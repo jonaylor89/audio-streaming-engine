@@ -1,0 +1,17 @@
+application:
+  host: 127.0.0.1
+  web_ui: true
+
+storage:
+  base_dir: "uploads"
+  path_prefix: ""
+
+processor:
+  max_filter_ops: 256
+  max_cache_files: 1000
+  max_cache_mem: 256
+  max_cache_size: 1024
+
+cache:
+  Filesystem:
+    base_dir: "cache"
