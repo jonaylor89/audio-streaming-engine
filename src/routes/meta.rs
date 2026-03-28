@@ -1,10 +1,16 @@
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{Json, extract::State};
+use color_eyre::eyre::eyre;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{info, instrument};
 use utoipa::ToSchema;
 
-use crate::{remote::fetch_audio_buffer, state::AppStateDyn, streamingpath::params::Params};
+use crate::{
+    remote::fetch_audio_buffer,
+    state::AppStateDyn,
+    streamingpath::params::Params,
+    utils::{AppError, e404, e500},
+};
 
 #[derive(Serialize, Deserialize, Debug, ToSchema)]
 pub struct AudioMetadata {
@@ -22,7 +28,7 @@ pub struct AudioMetadata {
 pub async fn meta_handler(
     State(state): State<AppStateDyn>,
     params: Params,
-) -> Result<Json<AudioMetadata>, (StatusCode, String)> {
+) -> Result<Json<AudioMetadata>, AppError> {
     info!("meta: {:?}", params);
 
     let blob = if params.key.starts_with("https://") || params.key.starts_with("http://") {
@@ -30,19 +36,13 @@ pub async fn meta_handler(
     } else {
         state.storage.get(&params.key).await.map_err(|e| {
             tracing::error!("Failed to fetch audio from storage {}: {}", params.key, e);
-            (
-                StatusCode::NOT_FOUND,
-                format!("Failed to fetch audio: {}", e),
-            )
+            e404(eyre!("Failed to fetch audio: {}", e))
         })?
     };
 
     let processed_blob = state.processor.process(&blob, &params).await.map_err(|e| {
         tracing::error!("Failed to process audio with params {:?}: {}", params, e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to process audio: {}", e),
-        )
+        e500(eyre!("Failed to process audio: {}", e))
     })?;
 
     let audio_data = processed_blob.as_ref().to_vec();
@@ -50,17 +50,11 @@ pub async fn meta_handler(
         .await
         .map_err(|e| {
             tracing::error!("Metadata extraction task panicked: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Metadata extraction task failed: {}", e),
-            )
+            e500(eyre!("Metadata extraction task failed: {}", e))
         })?
         .map_err(|e| {
             tracing::error!("Failed to extract metadata: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to extract metadata: {}", e),
-            )
+            e500(eyre!("Failed to extract metadata: {}", e))
         })?;
 
     let metadata = AudioMetadata {

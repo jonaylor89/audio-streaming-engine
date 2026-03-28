@@ -56,7 +56,11 @@ pub fn extract_metadata(data: &[u8]) -> Result<AudioFileMetadata, FfmpegError> {
     // Bit rate
     let bit_rate = unsafe {
         let br = (*format_ctx).bit_rate;
-        if br > 0 { Some(br) } else { None }
+        if br > 0 {
+            Some(br)
+        } else {
+            None
+        }
     };
 
     // Format-level tags
@@ -85,7 +89,11 @@ pub fn extract_metadata(data: &[u8]) -> Result<AudioFileMetadata, FfmpegError> {
         }
 
         (
-            if sample_rate > 0 { Some(sample_rate) } else { None },
+            if sample_rate > 0 {
+                Some(sample_rate)
+            } else {
+                None
+            },
             if channels > 0 { Some(channels) } else { None },
             codec_name,
         )

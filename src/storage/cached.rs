@@ -64,11 +64,11 @@ impl<S: AudioStorage + Clone + Send + Sync + 'static> CachedStorage<S> {
 
     async fn write_to_cache(&self, key: &str, blob: &AudioBuffer) {
         let path = self.cache_path(key);
-        if let Some(parent) = path.parent() {
-            if let Err(e) = fs::create_dir_all(parent).await {
-                warn!(key, error = %e, "failed to create local cache directory");
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = fs::create_dir_all(parent).await
+        {
+            warn!(key, error = %e, "failed to create local cache directory");
+            return;
         }
 
         if let Err(e) = fs::write(&path, blob.as_ref()).await {
@@ -91,13 +91,13 @@ async fn run_eviction(cache_dir: &PathBuf, max_size_bytes: u64) -> Result<()> {
     let mut total_size: u64 = 0;
     let mut dir = fs::read_dir(cache_dir).await?;
     while let Some(entry) = dir.next_entry().await? {
-        if let Ok(meta) = entry.metadata().await {
-            if meta.is_file() {
-                let size = meta.len();
-                let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                total_size += size;
-                entries.push((entry.path(), size, modified));
-            }
+        if let Ok(meta) = entry.metadata().await
+            && meta.is_file()
+        {
+            let size = meta.len();
+            let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            total_size += size;
+            entries.push((entry.path(), size, modified));
         }
     }
 

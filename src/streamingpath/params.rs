@@ -1,9 +1,7 @@
-use axum::{
-    extract::FromRequestParts,
-    http::{StatusCode, request::Parts},
-};
+use axum::{extract::FromRequestParts, http::request::Parts};
 use base64::{Engine as _, engine::general_purpose};
-use color_eyre::{Result, eyre};
+use color_eyre::Result;
+use color_eyre::eyre::eyre;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -29,7 +27,7 @@ impl<S> FromRequestParts<S> for Params
 where
     S: Send + Sync,
 {
-    type Rejection = (StatusCode, String);
+    type Rejection = crate::utils::AppError;
 
     #[tracing::instrument(skip(parts, _state))]
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
@@ -47,12 +45,8 @@ where
                 .into_owned()
                 .collect();
 
-        let params = Params::from_path(path.to_string(), query_params).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to parse params: {}", e),
-            )
-        })?;
+        let params = Params::from_path(path.to_string(), query_params)
+            .map_err(|e| crate::utils::e400(eyre!("Failed to parse params: {}", e)))?;
 
         Ok(params)
     }
@@ -202,8 +196,8 @@ impl Params {
             .unwrap_or(path)
             .trim_start_matches('/');
 
-        let decoded = urlencoding::decode(raw_key)
-            .map_err(|e| eyre::eyre!("Invalid encoded audio path: {}", e))?;
+        let decoded =
+            urlencoding::decode(raw_key).map_err(|e| eyre!("Invalid encoded audio path: {}", e))?;
 
         Ok(decoded.into_owned())
     }
@@ -585,11 +579,11 @@ impl Params {
     pub fn decode(encoded: &str) -> Result<Self> {
         let decoded_bytes = general_purpose::URL_SAFE_NO_PAD
             .decode(encoded)
-            .map_err(|e| eyre::eyre!("Failed to decode base64: {}", e))?;
+            .map_err(|e| eyre!("Failed to decode base64: {}", e))?;
         let json = String::from_utf8(decoded_bytes)
-            .map_err(|e| eyre::eyre!("Invalid UTF-8 in decoded data: {}", e))?;
+            .map_err(|e| eyre!("Invalid UTF-8 in decoded data: {}", e))?;
         let params: Self =
-            serde_json::from_str(&json).map_err(|e| eyre::eyre!("Failed to parse JSON: {}", e))?;
+            serde_json::from_str(&json).map_err(|e| eyre!("Failed to parse JSON: {}", e))?;
         Ok(params)
     }
 

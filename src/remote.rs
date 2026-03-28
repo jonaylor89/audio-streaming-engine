@@ -1,74 +1,52 @@
 use axum::http::StatusCode;
+use color_eyre::eyre::eyre;
 use reqwest::Client;
 use serde::Deserialize;
 use tracing::warn;
 
 use crate::blob::AudioBuffer;
+use crate::utils::{AppError, e400, e404, e500};
 
 const AUDIOUS_API_BASE_URL: &str = "https://api.audius.co/v1";
 
 /// Maximum allowed response body size for remote audio fetches (256 MB).
 const MAX_REMOTE_BODY_SIZE: usize = 256 * 1024 * 1024;
 
-pub async fn fetch_audio_buffer(
-    client: &Client,
-    source: &str,
-) -> Result<AudioBuffer, (StatusCode, String)> {
+pub async fn fetch_audio_buffer(client: &Client, source: &str) -> Result<AudioBuffer, AppError> {
     let resolved = resolve_remote_source(client, source).await?;
 
-    let response = client
-        .get(&resolved)
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to fetch audio from URL {}: {}", resolved, e);
-            (
-                StatusCode::NOT_FOUND,
-                format!("Failed to fetch audio: {}", e),
-            )
-        })?;
+    let response = client.get(&resolved).send().await.map_err(|e| {
+        tracing::error!("Failed to fetch audio from URL {}: {}", resolved, e);
+        e404(eyre!("Failed to fetch audio: {}", e))
+    })?;
 
-    if let Some(content_length) = response.content_length() {
-        if content_length as usize > MAX_REMOTE_BODY_SIZE {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "Remote audio too large: {} bytes (max {})",
-                    content_length, MAX_REMOTE_BODY_SIZE
-                ),
-            ));
-        }
+    if let Some(content_length) = response.content_length()
+        && content_length as usize > MAX_REMOTE_BODY_SIZE
+    {
+        return Err(e400(eyre!(
+            "Remote audio too large: {} bytes (max {})",
+            content_length,
+            MAX_REMOTE_BODY_SIZE
+        )));
     }
 
-    let raw_bytes = response
-        .bytes()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to read bytes from URL {}: {}", resolved, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to fetch audio: {}", e),
-            )
-        })?;
+    let raw_bytes = response.bytes().await.map_err(|e| {
+        tracing::error!("Failed to read bytes from URL {}: {}", resolved, e);
+        e500(eyre!("Failed to fetch audio: {}", e))
+    })?;
 
     if raw_bytes.len() > MAX_REMOTE_BODY_SIZE {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Remote audio too large: {} bytes (max {})",
-                raw_bytes.len(),
-                MAX_REMOTE_BODY_SIZE
-            ),
-        ));
+        return Err(e400(eyre!(
+            "Remote audio too large: {} bytes (max {})",
+            raw_bytes.len(),
+            MAX_REMOTE_BODY_SIZE
+        )));
     }
 
     Ok(AudioBuffer::from_bytes(raw_bytes))
 }
 
-async fn resolve_remote_source(
-    client: &Client,
-    source: &str,
-) -> Result<String, (StatusCode, String)> {
+async fn resolve_remote_source(client: &Client, source: &str) -> Result<String, AppError> {
     if is_audius_url(source) {
         resolve_audius_stream_url(client, source).await
     } else {
@@ -87,14 +65,11 @@ fn is_audius_url(source: &str) -> bool {
             .is_some_and(|host| host == "audius.co" || host.ends_with(".audius.co"))
 }
 
-async fn resolve_audius_stream_url(
-    client: &Client,
-    source: &str,
-) -> Result<String, (StatusCode, String)> {
+async fn resolve_audius_stream_url(client: &Client, source: &str) -> Result<String, AppError> {
     let resolver = AudiusResolver::new(client.clone(), AUDIOUS_API_BASE_URL.to_string());
     resolver.resolve_stream_url(source).await.map_err(|e| {
         tracing::error!("Failed to resolve Audius URL {}: {}", source, e);
-        (StatusCode::BAD_GATEWAY, e)
+        AppError::new(eyre!("{}", e), StatusCode::BAD_GATEWAY)
     })
 }
 

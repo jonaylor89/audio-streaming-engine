@@ -25,7 +25,7 @@ use axum::middleware;
 use axum::routing::get;
 use axum::{Router, serve::Serve};
 use color_eyre::Result;
-use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::{WrapErr, eyre};
 #[cfg(feature = "s3")]
 use secrecy::ExposeSecret;
 use std::future::ready;
@@ -151,25 +151,21 @@ impl Application {
             }
             #[cfg(not(any(feature = "s3", feature = "gcs", feature = "filesystem")))]
             _ => {
-                return Err(color_eyre::eyre::eyre!(
+                return Err(eyre!(
                     "No storage backend feature enabled. Enable one of: filesystem, gcs, s3"
                 ));
             }
             #[cfg(not(feature = "s3"))]
             Some(StorageClient::S3(_)) => {
-                return Err(color_eyre::eyre::eyre!(
-                    "S3 storage requested but s3 feature not enabled"
-                ));
+                return Err(eyre!("S3 storage requested but s3 feature not enabled"));
             }
             #[cfg(not(feature = "gcs"))]
             Some(StorageClient::GCS(_)) => {
-                return Err(color_eyre::eyre::eyre!(
-                    "GCS storage requested but gcs feature not enabled"
-                ));
+                return Err(eyre!("GCS storage requested but gcs feature not enabled"));
             }
             #[cfg(not(feature = "filesystem"))]
             None => {
-                return Err(color_eyre::eyre::eyre!(
+                return Err(eyre!(
                     "Filesystem storage requested but filesystem feature not enabled"
                 ));
             }

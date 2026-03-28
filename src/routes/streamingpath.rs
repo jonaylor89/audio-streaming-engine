@@ -1,22 +1,24 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{Response, StatusCode, header},
+    http::{Response, header},
     response::IntoResponse,
 };
+use color_eyre::eyre::eyre;
 use tracing::{info, instrument, warn};
 
 use crate::{
     remote::fetch_audio_buffer,
     state::AppStateDyn,
     streamingpath::{hasher::suffix_result_storage_hasher, params::Params},
+    utils::{AppError, e404, e500},
 };
 
 #[instrument(skip(state))]
 pub async fn streamingpath_handler(
     State(state): State<AppStateDyn>,
     params: Params,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, AppError> {
     let params_hash = suffix_result_storage_hasher(&params);
     let result = state.storage.get(&params_hash).await.inspect_err(|_| {
         info!("no audio in results storage: {}", &params);
@@ -25,12 +27,7 @@ pub async fn streamingpath_handler(
         return Response::builder()
             .header(header::CONTENT_TYPE, blob.mime_type())
             .body(Body::from(blob.into_bytes()))
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to build response: {}", e),
-                )
-            });
+            .map_err(|e| e500(eyre!("Failed to build response: {}", e)));
     }
 
     let blob = if params.key.starts_with("https://") || params.key.starts_with("http://") {
@@ -38,19 +35,13 @@ pub async fn streamingpath_handler(
     } else {
         state.storage.get(&params.key).await.map_err(|e| {
             tracing::error!("Failed to fetch audio from storage {}: {}", params.key, e);
-            (
-                StatusCode::NOT_FOUND,
-                format!("Failed to fetch audio: {}", e),
-            )
+            e404(eyre!("Failed to fetch audio: {}", e))
         })?
     };
 
     let processed_blob = state.processor.process(&blob, &params).await.map_err(|e| {
         tracing::error!("Failed to process audio with params {:?}: {}", params, e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to process audio: {}", e),
-        )
+        e500(eyre!("Failed to process audio: {}", e))
     })?;
 
     let mime = processed_blob.mime_type().to_owned();
@@ -70,10 +61,5 @@ pub async fn streamingpath_handler(
     Response::builder()
         .header(header::CONTENT_TYPE, mime)
         .body(Body::from(result_bytes))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to build response: {}", e),
-            )
-        })
+        .map_err(|e| e500(eyre!("Failed to build response: {}", e)))
 }

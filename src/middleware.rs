@@ -1,6 +1,7 @@
 use crate::state::AppStateDyn;
 use crate::streamingpath::hasher::{suffix_result_storage_hasher, verify_hash};
 use crate::streamingpath::params::Params;
+use crate::utils::{AppError, e400, e416, e500};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode, header};
 use axum::{
     body::{Body, Bytes, to_bytes},
@@ -8,6 +9,7 @@ use axum::{
     middleware::Next,
     response::IntoResponse,
 };
+use color_eyre::eyre::eyre;
 use std::time::Duration;
 use tracing::debug;
 
@@ -23,7 +25,7 @@ pub async fn cache_middleware(
     params: Params,
     mut req: Request,
     next: Next,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, AppError> {
     let params_hash = suffix_result_storage_hasher(&params);
     let request_headers = req.headers().clone();
 
@@ -37,12 +39,11 @@ pub async fn cache_middleware(
     let cache_key = format!("{}:{}:{}", cache_key_prefix, req.method(), params_hash);
 
     debug!("Cache key: {}", cache_key);
-    let cache_response = state.cache.get(&cache_key).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to get cache: {}", e),
-        )
-    })?;
+    let cache_response = state
+        .cache
+        .get(&cache_key)
+        .await
+        .map_err(|e| e500(eyre!("Failed to get cache: {}", e)))?;
     if let Some(buf) = cache_response {
         let content_type = infer::get(&buf)
             .map(|mime| mime.to_string())
@@ -63,12 +64,7 @@ pub async fn cache_middleware(
     let (parts, body) = response.into_parts();
     let bytes = to_bytes(body, MAX_CACHEABLE_BODY_SIZE)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to read response body: {}", e),
-            )
-        })?;
+        .map_err(|e| e500(eyre!("Failed to read response body: {}", e)))?;
 
     let content_type = parts
         .headers
@@ -95,7 +91,7 @@ pub async fn auth_middleware(
     params: Params,
     req: Request,
     next: Next,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, AppError> {
     let path = params.to_string();
 
     let hash = req
@@ -104,18 +100,11 @@ pub async fn auth_middleware(
         .trim_start_matches("/meta")
         .strip_prefix("/")
         .and_then(|s| s.split("/").next())
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Failed to parse URI hash".to_string(),
-        ))?;
+        .ok_or_else(|| e400(eyre!("Failed to parse URI hash")))?;
 
     if hash != "unsafe" {
-        verify_hash(hash.to_owned().into(), path.to_owned().into()).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to verify hash: {}", e),
-            )
-        })?;
+        verify_hash(hash.to_owned().into(), path.to_owned().into())
+            .map_err(|e| e400(eyre!("Failed to verify hash: {}", e)))?;
     }
 
     Ok(next.run(req).await)
@@ -125,7 +114,7 @@ fn build_audio_response(
     request_headers: &HeaderMap,
     content_type: &str,
     body: Bytes,
-) -> Result<Response<Body>, (StatusCode, String)> {
+) -> Result<Response<Body>, AppError> {
     match parse_range(request_headers, body.len())? {
         Some((start, end)) => {
             let content = body.slice(start..=end);
@@ -145,12 +134,7 @@ fn build_audio_response(
                     HeaderValue::from_static("inline"),
                 )
                 .body(Body::from(content))
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to build response: {}", e),
-                    )
-                })
+                .map_err(e500)
         }
         None => Response::builder()
             .header(header::CONTENT_TYPE, content_type)
@@ -163,100 +147,64 @@ fn build_audio_response(
                 HeaderValue::from_static("inline"),
             )
             .body(Body::from(body))
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to build response: {}", e),
-                )
-            }),
+            .map_err(e500),
     }
 }
 
 fn parse_range(
     request_headers: &HeaderMap,
     total_size: usize,
-) -> Result<Option<(usize, usize)>, (StatusCode, String)> {
+) -> Result<Option<(usize, usize)>, AppError> {
     let Some(range) = request_headers.get(header::RANGE) else {
         return Ok(None);
     };
 
-    let range = range.to_str().map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Range header must be valid ASCII".to_string(),
-        )
-    })?;
+    let range = range
+        .to_str()
+        .map_err(|_| e400(eyre!("Range header must be valid ASCII")))?;
 
-    let range = range.strip_prefix("bytes=").ok_or_else(|| {
-        (
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            "Only byte ranges are supported".to_string(),
-        )
-    })?;
+    let range = range
+        .strip_prefix("bytes=")
+        .ok_or_else(|| e416(eyre!("Only byte ranges are supported")))?;
 
     if total_size == 0 || range.contains(',') {
-        return Err((
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            "Requested range cannot be satisfied".to_string(),
-        ));
+        return Err(e416(eyre!("Requested range cannot be satisfied")));
     }
 
     let Some((start, end)) = range.split_once('-') else {
-        return Err((
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            "Invalid Range header".to_string(),
-        ));
+        return Err(e416(eyre!("Invalid Range header")));
     };
 
     if start.is_empty() {
-        let suffix_len = end.parse::<usize>().map_err(|_| {
-            (
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                "Invalid suffix byte range".to_string(),
-            )
-        })?;
+        let suffix_len = end
+            .parse::<usize>()
+            .map_err(|_| e416(eyre!("Invalid suffix byte range")))?;
 
         if suffix_len == 0 {
-            return Err((
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                "Requested range cannot be satisfied".to_string(),
-            ));
+            return Err(e416(eyre!("Requested range cannot be satisfied")));
         }
 
         let start = total_size.saturating_sub(suffix_len);
         return Ok(Some((start, total_size - 1)));
     }
 
-    let start = start.parse::<usize>().map_err(|_| {
-        (
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            "Invalid byte range start".to_string(),
-        )
-    })?;
+    let start = start
+        .parse::<usize>()
+        .map_err(|_| e416(eyre!("Invalid byte range start")))?;
 
     if start >= total_size {
-        return Err((
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            "Requested range cannot be satisfied".to_string(),
-        ));
+        return Err(e416(eyre!("Requested range cannot be satisfied")));
     }
 
     let end = if end.is_empty() {
         total_size - 1
     } else {
-        end.parse::<usize>().map_err(|_| {
-            (
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                "Invalid byte range end".to_string(),
-            )
-        })?
+        end.parse::<usize>()
+            .map_err(|_| e416(eyre!("Invalid byte range end")))?
     };
 
     if end < start {
-        return Err((
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            "Requested range cannot be satisfied".to_string(),
-        ));
+        return Err(e416(eyre!("Requested range cannot be satisfied")));
     }
 
     Ok(Some((start, end.min(total_size - 1))))

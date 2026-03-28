@@ -8,6 +8,7 @@ use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use color_eyre::Result;
+use color_eyre::eyre;
 use tracing::{debug, info, warn};
 
 #[derive(Clone)]
@@ -200,7 +201,7 @@ async fn wait_for_minio(client: &Client, max_retries: u32, delay: Duration) -> R
             }
         }
     }
-    Err(color_eyre::eyre::eyre!(
+    Err(eyre!(
         "Failed to connect to MinIO after {} retries",
         max_retries
     ))

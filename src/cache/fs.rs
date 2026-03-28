@@ -79,17 +79,17 @@ async fn run_eviction(base_path: &Path, max_size_bytes: u64) -> Result<()> {
     let mut total_size: u64 = 0;
     let mut dir = tokio_fs::read_dir(base_path).await?;
     while let Some(entry) = dir.next_entry().await? {
-        if let Ok(meta) = entry.metadata().await {
-            if meta.is_file() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("meta") {
-                    continue;
-                }
-                let size = meta.len();
-                let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                total_size += size;
-                entries.push((path, size, modified));
+        if let Ok(meta) = entry.metadata().await
+            && meta.is_file()
+        {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("meta") {
+                continue;
             }
+            let size = meta.len();
+            let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            total_size += size;
+            entries.push((path, size, modified));
         }
     }
 

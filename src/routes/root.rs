@@ -1,22 +1,18 @@
 use axum::{
     extract::State,
-    http::StatusCode,
     response::{Html, IntoResponse},
 };
 use tracing::instrument;
 
 use crate::state::AppStateDyn;
+use crate::utils::{AppError, e500};
+use color_eyre::eyre::eyre;
 
 #[instrument(skip(state))]
-pub async fn root_handler(
-    State(state): State<AppStateDyn>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+pub async fn root_handler(State(state): State<AppStateDyn>) -> Result<impl IntoResponse, AppError> {
     let keys = state.storage.list().await.map_err(|e| {
         tracing::error!("Failed to list audio files: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to list files: {}", e),
-        )
+        e500(eyre!("Failed to list files: {}", e))
     })?;
 
     let mut rows = String::new();
