@@ -25,7 +25,7 @@ The benchmarking suite consists of 5 specialized benchmark modules designed to m
 ### 3. Hash Operations (`hash_operations.rs`)
 - **SHA1 Hashing**: Storage path hashing for different input sizes
 - **Parameter Hashing**: Hash generation from audio processing parameters
-- **Argon2 Operations**: Secure password hashing and verification
+- **HMAC-SHA256 Operations**: URL signature verification
 - **Hash Consistency**: Ensuring deterministic hash generation
 - **Collision Resistance**: Testing hash uniqueness for similar inputs
 
@@ -117,7 +117,7 @@ The benchmarks automatically run on every push and pull request through GitHub A
 ### Hash Operations
 - SHA1 throughput: > 100 MB/s
 - Parameter hashing: < 10µs
-- Argon2 operations: 10-50ms
+- HMAC-SHA256 operations: < 10µs
 
 ### Storage Operations
 - Cache hits: < 1ms
@@ -271,19 +271,3 @@ When adding new benchmarks:
 4. Test on multiple platforms
 5. Update documentation
 6. Verify CodSpeed compatibility by running `cargo codspeed build` locally
-
-### CodSpeed Setup for Contributors
-
-1. **Install CodSpeed CLI**: `cargo install cargo-codspeed --locked`
-2. **Test locally**: `cargo codspeed build -p streaming-engine && cargo codspeed run`
-3. **Verify CI integration**: Ensure benchmarks run successfully in GitHub Actions
-4. **Monitor performance**: Check CodSpeed reports on pull requests
-
-## Resources
-
-- [Benchmark Details](streaming-engine/benches/README.md)
-- [Divan Documentation](https://docs.rs/divan/latest/divan/)
-- [CodSpeed Documentation](https://docs.codspeed.io/benchmarks/rust/divan)
-- [Rust Performance Book](https://nnethercote.github.io/perf-book/)
-- [Project Architecture](README.md)
-- [CodSpeed Dashboard](https://codspeed.io/) (for viewing performance results)

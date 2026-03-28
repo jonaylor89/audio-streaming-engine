@@ -49,7 +49,7 @@ Add this to your Claude Desktop configuration file:
   "mcpServers": {
     "streaming-audio": {
       "command": "node",
-      "args": ["/path/to/streaming-engine/mcp-server/index.js"],
+      "args": ["/path/to/audio-streaming-engine/mcp-server/index.js"],
       "env": {
         "STREAMING_ENGINE_SERVER_URL": "http://localhost:8080"
       }
