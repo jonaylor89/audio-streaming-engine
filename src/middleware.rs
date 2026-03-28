@@ -59,7 +59,7 @@ pub async fn cache_middleware(
         return Ok(response);
     }
 
-    // Cache the response
+    // Buffer response body so we can cache it and handle range requests
     let (parts, body) = response.into_parts();
     let bytes = to_bytes(body, MAX_CACHEABLE_BODY_SIZE)
         .await
@@ -70,11 +70,6 @@ pub async fn cache_middleware(
             )
         })?;
 
-    let _ = state
-        .cache
-        .set(&cache_key, bytes.as_ref(), Some(CACHE_TTL))
-        .await;
-
     let content_type = parts
         .headers
         .get(header::CONTENT_TYPE)
@@ -82,6 +77,15 @@ pub async fn cache_middleware(
         .map(str::to_owned)
         .or_else(|| infer::get(bytes.as_ref()).map(|mime| mime.to_string()))
         .unwrap_or_else(|| "application/octet-stream".to_string());
+
+    // Write to cache in background — don't block the response
+    let bg_cache = state.cache.clone();
+    let bg_bytes = bytes.clone();
+    tokio::spawn(async move {
+        let _ = bg_cache
+            .set(&cache_key, bg_bytes.as_ref(), Some(CACHE_TTL))
+            .await;
+    });
 
     build_audio_response(&request_headers, &content_type, bytes)
 }

@@ -53,21 +53,23 @@ pub async fn streamingpath_handler(
         )
     })?;
 
-    state
-        .storage
-        .put(&params_hash, &processed_blob)
-        .await
-        .map_err(|e| {
-            warn!("Failed to save result audio [{}]: {}", &params_hash, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to save result audio: {}", e),
-            )
-        })?;
+    let mime = processed_blob.mime_type().to_owned();
+    let result_bytes = processed_blob.into_bytes();
+
+    // Store result in background — don't block the response
+    let bg_storage = state.storage.clone();
+    let bg_hash = params_hash;
+    let bg_bytes = result_bytes.clone();
+    let bg_format = crate::blob::AudioBuffer::from_bytes(bg_bytes);
+    tokio::spawn(async move {
+        if let Err(e) = bg_storage.put(&bg_hash, &bg_format).await {
+            warn!("Failed to save result audio [{}]: {}", &bg_hash, e);
+        }
+    });
 
     Response::builder()
-        .header(header::CONTENT_TYPE, processed_blob.mime_type())
-        .body(Body::from(processed_blob.into_bytes()))
+        .header(header::CONTENT_TYPE, mime)
+        .body(Body::from(result_bytes))
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
