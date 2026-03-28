@@ -13,12 +13,16 @@ pub enum Cache {
 }
 
 impl Cache {
-    pub fn new(config: CacheSettings) -> Result<Self> {
+    pub async fn new(config: CacheSettings) -> Result<Self> {
         match config {
-            CacheSettings::Redis { uri } => Ok(Cache::Redis(RedisCache::new(&uri)?)),
-            CacheSettings::Filesystem(FilesystemCacheSettings { base_dir }) => {
-                Ok(Cache::Filesystem(FileSystemCache::new(base_dir)?))
-            }
+            CacheSettings::Redis { uri } => Ok(Cache::Redis(RedisCache::new(&uri).await?)),
+            CacheSettings::Filesystem(FilesystemCacheSettings {
+                base_dir,
+                max_size_mb,
+            }) => Ok(Cache::Filesystem(FileSystemCache::new(
+                base_dir,
+                max_size_mb,
+            )?)),
         }
     }
 }

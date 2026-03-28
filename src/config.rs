@@ -84,6 +84,8 @@ pub struct S3Settings {
     pub endpoint: String,
     pub access_key: SecretString,
     pub secret_key: SecretString,
+
+    pub local_cache: Option<LocalCacheSettings>,
 }
 
 fn default_s3_endpoint() -> String {
@@ -93,6 +95,25 @@ fn default_s3_endpoint() -> String {
 #[derive(Deserialize, Clone)]
 pub struct GCSSettings {
     pub bucket: String,
+
+    pub local_cache: Option<LocalCacheSettings>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct LocalCacheSettings {
+    #[serde(default = "default_local_cache_dir")]
+    pub base_dir: String,
+
+    #[serde(default = "default_local_cache_max_size_mb")]
+    pub max_size_mb: u64,
+}
+
+fn default_local_cache_dir() -> String {
+    "source_cache".to_string()
+}
+
+fn default_local_cache_max_size_mb() -> u64 {
+    2048
 }
 
 fn default_port() -> u16 {
@@ -114,10 +135,16 @@ pub enum CacheSettings {
 pub struct FilesystemCacheSettings {
     #[serde(default = "default_cache_base_dir")]
     pub base_dir: String,
+    #[serde(default = "default_cache_max_size_mb")]
+    pub max_size_mb: u64,
 }
 
 fn default_cache_base_dir() -> String {
     "cache".to_string()
+}
+
+fn default_cache_max_size_mb() -> u64 {
+    1024 // 1 GB default
 }
 
 impl Default for CacheSettings {
