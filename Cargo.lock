@@ -182,6 +182,64 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "audio-streaming-engine"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "async-trait",
+ "aws-sdk-s3",
+ "axum 0.8.4",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "codspeed-divan-compat",
+ "color-eyre",
+ "config",
+ "dotenvy",
+ "ffmpeg",
+ "futures",
+ "gethostname 1.0.2",
+ "google-cloud-storage",
+ "hex",
+ "image",
+ "infer 0.19.0",
+ "lazy_static",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "mockall",
+ "nom",
+ "num_cpus",
+ "once_cell",
+ "pretty_assertions",
+ "rand 0.8.5",
+ "redis",
+ "regex",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde-aux",
+ "serde_json",
+ "serde_urlencoded",
+ "sha1",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tower_governor",
+ "tracing",
+ "tracing-bunyan-formatter",
+ "tracing-log 0.2.0",
+ "tracing-subscriber",
+ "url",
+ "urlencoding",
+ "utoipa",
+ "utoipa-swagger-ui",
+ "wiremock",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1529,6 +1587,7 @@ dependencies = [
 name = "ffmpeg"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "ffmpeg-sys",
  "libc",
  "thiserror 1.0.69",
@@ -4428,64 +4487,6 @@ name = "stable_deref_trait"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
-
-[[package]]
-name = "streaming-engine"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "async-trait",
- "aws-sdk-s3",
- "axum 0.8.4",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "codspeed-divan-compat",
- "color-eyre",
- "config",
- "dotenvy",
- "ffmpeg",
- "futures",
- "gethostname 1.0.2",
- "google-cloud-storage",
- "hex",
- "image",
- "infer 0.19.0",
- "lazy_static",
- "metrics",
- "metrics-exporter-prometheus",
- "mockall",
- "nom",
- "num_cpus",
- "once_cell",
- "pretty_assertions",
- "rand 0.8.5",
- "redis",
- "regex",
- "reqwest",
- "secrecy",
- "serde",
- "serde-aux",
- "serde_json",
- "serde_urlencoded",
- "sha1",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tower",
- "tower-http",
- "tower_governor",
- "tracing",
- "tracing-bunyan-formatter",
- "tracing-log 0.2.0",
- "tracing-subscriber",
- "url",
- "urlencoding",
- "utoipa",
- "utoipa-swagger-ui",
- "wiremock",
-]
 
 [[package]]
 name = "subtle"

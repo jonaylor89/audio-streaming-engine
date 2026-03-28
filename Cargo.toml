@@ -7,8 +7,8 @@ members = [
 resolver = "2"
 
 [workspace.package]
-authors = ["Johannes Naylor <jonaylor89@gmail.com>"]
-repository = "https://github.com/jonaylor89/streaming-engine"
+authors = ["Johannes Naylor <me@jonaylor.com>"]
+repository = "https://github.com/jonaylor89/audio-streaming-engine"
 
 [workspace.dependencies]
 tokio = { version = "1.0", features = ["full"] }
@@ -21,12 +21,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1.0"
 
 [package]
-name = "streaming-engine"
+name = "audio-streaming-engine"
 description = "Audio Streaming Server — on-the-fly audio processing via URL parameters"
 authors.workspace = true
 repository.workspace = true
 readme = "README.md"
-homepage = "https://github.com/jonaylor89/streaming-engine"
+homepage = "https://github.com/jonaylor89/audio-streaming-engine"
 keywords = ["audio", "sound", "server", "mcp", "streaming"]
 version = "0.1.0"
 edition = "2024"

@@ -1,4 +1,5 @@
 mod backend;
+pub mod cached;
 #[cfg(feature = "filesystem")]
 pub mod file;
 #[cfg(feature = "gcs")]
@@ -7,3 +8,4 @@ pub mod gcs;
 pub mod s3;
 
 pub use backend::AudioStorage;
+pub use cached::CachedStorage;

@@ -37,7 +37,7 @@
    gcloud config set project YOUR_PROJECT_ID
    
    # Build and deploy
-   gcloud run deploy streaming-engine \
+   gcloud run deploy audio-streaming-engine \
      --source . \
      --region us-central1 \
      --allow-unauthenticated \
@@ -51,7 +51,7 @@
 
 2. **Get Service URL**
    ```bash
-   gcloud run services describe streaming-engine --region=us-central1 --format="value(status.url)"
+   gcloud run services describe audio-streaming-engine --region=us-central1 --format="value(status.url)"
    ```
 
 ### Cloud Run Configuration
@@ -89,11 +89,11 @@ For production, consider using Cloud Storage instead of ephemeral storage:
 3. **Set up Service Account**
    ```bash
    # Create service account
-   gcloud iam service-accounts create streaming-engine-storage
+   gcloud iam service-accounts create audio-streaming-engine-storage
    
    # Grant storage permissions
    gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-     --member="serviceAccount:streaming-engine-storage@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+     --member="serviceAccount:audio-streaming-engine-storage@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
      --role="roles/storage.admin"
    
    # Create and download key
@@ -101,32 +101,12 @@ For production, consider using Cloud Storage instead of ephemeral storage:
      --iam-account=streaming-engine-storage@YOUR_PROJECT_ID.iam.gserviceaccount.com
    ```
 
-## MCP Server Distribution
-
-### Publishing to npm
-
-1. **Login to npm**
-   ```bash
-   cd mcp-server
-   npm login
-   ```
-
-2. **Publish**
-   ```bash
-   npm publish --access public
-   ```
-
-3. **Users can then run**
-   ```bash
-   npx @streaming-engine/mcp-server --server=https://your-app.run.app
-   ```
-
 ### Alternative Distribution
 
 Create a simple installation script:
 ```bash
 # install-mcp.sh
-curl -o streaming-engine-mcp.js https://raw.githubusercontent.com/jonaylor89/audio-streaming-engine/main/streaming-engine/main/mcp-server/index.js
+curl -o streaming-engine-mcp.js https://raw.githubusercontent.com/jonaylor89/audio-streaming-engine/main/mcp-server/index.js
 node streaming-engine-mcp.js
 ```
 
@@ -160,10 +140,10 @@ node streaming-engine-mcp.js
 ### Application Logs
 ```bash
 # View logs
-gcloud run services logs read streaming-engine --region=us-central1
+gcloud run services logs read audio-streaming-engine --region=us-central1
 
 # Follow logs
-gcloud run services logs tail streaming-engine --region=us-central1
+gcloud run services logs tail audio-streaming-engine --region=us-central1
 ```
 
 ### Health Checks
@@ -206,8 +186,8 @@ curl https://your-app.run.app/health
 curl https://your-app.run.app/api-schema
 
 # Check service status
-gcloud run services describe streaming-engine --region=us-central1
+gcloud run services describe audio-streaming-engine --region=us-central1
 
 # View recent logs
-gcloud run services logs read streaming-engine --region=us-central1 --limit=50
+gcloud run services logs read audio-streaming-engine --region=us-central1 --limit=50
 ```
