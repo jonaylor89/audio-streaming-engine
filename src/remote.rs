@@ -7,11 +7,16 @@ use crate::blob::AudioBuffer;
 
 const AUDIOUS_API_BASE_URL: &str = "https://api.audius.co/v1";
 
-pub async fn fetch_audio_buffer(source: &str) -> Result<AudioBuffer, (StatusCode, String)> {
-    let client = Client::new();
-    let resolved = resolve_remote_source(&client, source).await?;
+/// Maximum allowed response body size for remote audio fetches (256 MB).
+const MAX_REMOTE_BODY_SIZE: usize = 256 * 1024 * 1024;
 
-    let raw_bytes = client
+pub async fn fetch_audio_buffer(
+    client: &Client,
+    source: &str,
+) -> Result<AudioBuffer, (StatusCode, String)> {
+    let resolved = resolve_remote_source(client, source).await?;
+
+    let response = client
         .get(&resolved)
         .send()
         .await
@@ -21,7 +26,21 @@ pub async fn fetch_audio_buffer(source: &str) -> Result<AudioBuffer, (StatusCode
                 StatusCode::NOT_FOUND,
                 format!("Failed to fetch audio: {}", e),
             )
-        })?
+        })?;
+
+    if let Some(content_length) = response.content_length() {
+        if content_length as usize > MAX_REMOTE_BODY_SIZE {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Remote audio too large: {} bytes (max {})",
+                    content_length, MAX_REMOTE_BODY_SIZE
+                ),
+            ));
+        }
+    }
+
+    let raw_bytes = response
         .bytes()
         .await
         .map_err(|e| {
@@ -30,8 +49,18 @@ pub async fn fetch_audio_buffer(source: &str) -> Result<AudioBuffer, (StatusCode
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to fetch audio: {}", e),
             )
-        })?
-        .to_vec();
+        })?;
+
+    if raw_bytes.len() > MAX_REMOTE_BODY_SIZE {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Remote audio too large: {} bytes (max {})",
+                raw_bytes.len(),
+                MAX_REMOTE_BODY_SIZE
+            ),
+        ));
+    }
 
     Ok(AudioBuffer::from_bytes(raw_bytes))
 }

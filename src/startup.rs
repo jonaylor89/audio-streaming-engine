@@ -12,6 +12,8 @@ use crate::routes::root::root_handler;
 use crate::routes::streamingpath::streamingpath_handler;
 use crate::state::{AppStateDyn, WebConfig};
 use crate::storage::AudioStorage;
+#[cfg(any(feature = "s3", feature = "gcs"))]
+use crate::storage::CachedStorage;
 #[cfg(feature = "filesystem")]
 use crate::storage::file::FileStorage;
 #[cfg(feature = "gcs")]
@@ -29,6 +31,7 @@ use secrecy::ExposeSecret;
 use std::future::ready;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -77,12 +80,13 @@ impl Application {
         };
 
         let processor = Processor::new(config.processor);
-        let cache = Cache::new(config.cache)?;
+        let cache = Cache::new(config.cache).await?;
 
         let server = match config.storage.client {
             #[cfg(feature = "s3")]
             Some(StorageClient::S3(s3_settings)) => {
                 info!("Using S3 storage");
+                let local_cache = s3_settings.local_cache.clone();
                 let storage = S3Storage::new(
                     config.storage.base_dir,
                     config.storage.path_prefix,
@@ -98,11 +102,22 @@ impl Application {
                 // Ensure bucket exists
                 storage.ensure_bucket_exists().await?;
 
-                run(listener, storage, processor, cache, web_ui, web_config).await?
+                if let Some(ref cache_settings) = local_cache {
+                    info!(
+                        base_dir = cache_settings.base_dir,
+                        max_size_mb = cache_settings.max_size_mb,
+                        "local source cache enabled for S3"
+                    );
+                    let cached = CachedStorage::new(storage, cache_settings);
+                    run(listener, cached, processor, cache, web_ui, web_config).await?
+                } else {
+                    run(listener, storage, processor, cache, web_ui, web_config).await?
+                }
             }
             #[cfg(feature = "gcs")]
             Some(StorageClient::GCS(gcs_settings)) => {
                 info!("using GCS storage");
+                let local_cache = gcs_settings.local_cache.clone();
                 let storage = GCloudStorage::new(
                     config.storage.base_dir,
                     config.storage.path_prefix,
@@ -111,7 +126,17 @@ impl Application {
                 )
                 .await;
 
-                run(listener, storage, processor, cache, web_ui, web_config).await?
+                if let Some(ref cache_settings) = local_cache {
+                    info!(
+                        base_dir = cache_settings.base_dir,
+                        max_size_mb = cache_settings.max_size_mb,
+                        "local source cache enabled for GCS"
+                    );
+                    let cached = CachedStorage::new(storage, cache_settings);
+                    run(listener, cached, processor, cache, web_ui, web_config).await?
+                } else {
+                    run(listener, storage, processor, cache, web_ui, web_config).await?
+                }
             }
             #[cfg(feature = "filesystem")]
             None => {
@@ -182,10 +207,17 @@ where
 {
     let recorder_handle = setup_metrics_recorder();
 
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to build HTTP client");
+
     let state = AppStateDyn {
         storage: Arc::new(storage.clone()),
         processor: Arc::new(processor),
         cache: Arc::new(cache.clone()),
+        http_client,
         web_config,
     };
 

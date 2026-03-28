@@ -14,6 +14,8 @@ use tracing::debug;
 const CACHE_KEY_PREFIX: &str = "req_cache:";
 const META_CACHE_KEY_PREFIX: &str = "meta_cache:";
 const CACHE_TTL: Duration = Duration::from_secs(3600); // 1 hour
+/// Maximum response body size we will buffer for caching (256 MB).
+const MAX_CACHEABLE_BODY_SIZE: usize = 256 * 1024 * 1024;
 
 #[tracing::instrument(skip(state, req, next))]
 pub async fn cache_middleware(
@@ -59,12 +61,14 @@ pub async fn cache_middleware(
 
     // Cache the response
     let (parts, body) = response.into_parts();
-    let bytes = to_bytes(body, usize::MAX).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to read response body: {}", e),
-        )
-    })?;
+    let bytes = to_bytes(body, MAX_CACHEABLE_BODY_SIZE)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read response body: {}", e),
+            )
+        })?;
 
     let _ = state
         .cache
