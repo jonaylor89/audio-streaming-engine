@@ -144,7 +144,7 @@ mod filesystem_cache_operations {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let temp_dir = tempdir().unwrap();
-            let cache = FileSystemCache::new(temp_dir.path()).unwrap();
+            let cache = FileSystemCache::new(temp_dir.path(), 1000).unwrap();
             let data = generate_audio_data(size_kb, AudioFormat::Mp3);
 
             black_box(cache.set("test_key", &data, None).await)
@@ -156,7 +156,7 @@ mod filesystem_cache_operations {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let temp_dir = tempdir().unwrap();
-            let cache = FileSystemCache::new(temp_dir.path()).unwrap();
+            let cache = FileSystemCache::new(temp_dir.path(), 1000).unwrap();
             let data = generate_audio_data(size_kb, AudioFormat::Mp3);
             cache.set("test_key", &data, None).await.unwrap();
 
@@ -169,7 +169,7 @@ mod filesystem_cache_operations {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let temp_dir = tempdir().unwrap();
-            let cache = FileSystemCache::new(temp_dir.path()).unwrap();
+            let cache = FileSystemCache::new(temp_dir.path(), 1000).unwrap();
             let data = generate_audio_data(10, AudioFormat::Mp3);
             cache.set("test_key", &data, None).await.unwrap();
 
@@ -182,7 +182,7 @@ mod filesystem_cache_operations {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let temp_dir = tempdir().unwrap();
-            let cache = FileSystemCache::new(temp_dir.path()).unwrap();
+            let cache = FileSystemCache::new(temp_dir.path(), 1000).unwrap();
             let data = generate_audio_data(10, AudioFormat::Mp3);
             let ttl = Some(Duration::from_secs(3600)); // 1 hour
 
@@ -195,7 +195,7 @@ mod filesystem_cache_operations {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let temp_dir = tempdir().unwrap();
-            let cache = FileSystemCache::new(temp_dir.path()).unwrap();
+            let cache = FileSystemCache::new(temp_dir.path(), 1000).unwrap();
             let data = generate_audio_data(10, AudioFormat::Mp3);
             // This cache stores TTL metadata with second precision, so keep the sleep short
             // and use this benchmark as a metadata-path smoke check rather than a strict expiry test.
@@ -233,7 +233,7 @@ mod storage_vs_cache_comparison {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let temp_dir = tempdir().unwrap();
-            let cache = FileSystemCache::new(temp_dir.path()).unwrap();
+            let cache = FileSystemCache::new(temp_dir.path(), 1000).unwrap();
             let data = generate_audio_data(size_kb, AudioFormat::Mp3);
 
             black_box(cache.set("perf_test", &data, None).await)
@@ -263,7 +263,7 @@ mod storage_vs_cache_comparison {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let temp_dir = tempdir().unwrap();
-            let cache = FileSystemCache::new(temp_dir.path()).unwrap();
+            let cache = FileSystemCache::new(temp_dir.path(), 1000).unwrap();
             let data = generate_audio_data(size_kb, AudioFormat::Mp3);
             cache.set("perf_test", &data, None).await.unwrap();
 
@@ -355,7 +355,7 @@ mod error_handling {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let temp_dir = tempdir().unwrap();
-            let cache = FileSystemCache::new(temp_dir.path()).unwrap();
+            let cache = FileSystemCache::new(temp_dir.path(), 1000).unwrap();
 
             black_box(cache.get("nonexistent_key").await)
         })
@@ -366,7 +366,7 @@ mod error_handling {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let temp_dir = tempdir().unwrap();
-            let cache = FileSystemCache::new(temp_dir.path()).unwrap();
+            let cache = FileSystemCache::new(temp_dir.path(), 1000).unwrap();
 
             black_box(cache.delete("nonexistent_key").await)
         })

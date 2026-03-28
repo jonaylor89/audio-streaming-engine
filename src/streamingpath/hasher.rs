@@ -1,16 +1,15 @@
 use super::params;
-use argon2::{
-    Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version,
-    password_hash::SaltString,
-};
-
 use color_eyre::{
     Result,
-    eyre::{Context, Error},
+    eyre::{Error, eyre},
 };
 use hex;
+use hmac::{Hmac, Mac};
 use secrecy::{ExposeSecret, SecretBox, SecretString};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(thiserror::Error, Debug)]
 pub enum AuthError {
@@ -65,36 +64,34 @@ pub fn suffix_result_storage_hasher(p: &params::Params) -> String {
     format!("{}{}", audio, hash)
 }
 
-#[tracing::instrument(name = "Verify path hash", skip(expected_path_hash, path_candidate))]
+#[tracing::instrument(
+    name = "Verify path hash",
+    skip(expected_path_hash, path_candidate, secret)
+)]
 pub fn verify_hash(
     expected_path_hash: SecretString,
     path_candidate: SecretString,
+    secret: &SecretString,
 ) -> Result<(), AuthError> {
-    let expected_path_hash = PasswordHash::new(expected_path_hash.expose_secret())
-        .context("Failed to parse hash in PHC string format.")?;
+    let mut mac = HmacSha256::new_from_slice(secret.expose_secret().as_bytes())
+        .map_err(|e| AuthError::UnexpectedError(eyre!("Invalid HMAC key: {}", e)))?;
+    mac.update(path_candidate.expose_secret().as_bytes());
 
-    Argon2::default()
-        .verify_password(
-            path_candidate.expose_secret().as_bytes(),
-            &expected_path_hash,
-        )
-        .context("Invalid hash")
-        .map_err(AuthError::InvalidCredentials)
+    let expected_bytes = hex::decode(expected_path_hash.expose_secret())
+        .map_err(|e| AuthError::InvalidCredentials(eyre!("Invalid hash format: {}", e)))?;
+
+    mac.verify_slice(&expected_bytes)
+        .map_err(|_| AuthError::InvalidCredentials(eyre!("Invalid hash")))
 }
 
-#[tracing::instrument(name = "Compute path hash", skip(path))]
-pub fn compute_hash(path: String) -> Result<SecretString> {
-    let salt = SaltString::generate(&mut rand::thread_rng());
-    let hash_password = Argon2::new(
-        Algorithm::Argon2id,
-        Version::V0x13,
-        Params::new(15_000, 2, 1, None).unwrap(),
-    )
-    .hash_password(path.as_bytes(), &salt);
-
-    let password_hash = hash_password?.to_string();
-
-    Ok(SecretBox::from(password_hash))
+#[tracing::instrument(name = "Compute path hash", skip(path, secret))]
+pub fn compute_hash(path: String, secret: &SecretString) -> Result<SecretString> {
+    let mut mac = HmacSha256::new_from_slice(secret.expose_secret().as_bytes())
+        .map_err(|e| eyre!("Invalid HMAC key: {}", e))?;
+    mac.update(path.as_bytes());
+    let result = mac.finalize();
+    let code_bytes = result.into_bytes();
+    Ok(SecretBox::from(hex::encode(code_bytes)))
 }
 #[cfg(test)]
 mod tests {
@@ -103,19 +100,25 @@ mod tests {
     use crate::blob::AudioFormat;
     use color_eyre::Result;
 
+    fn test_secret() -> SecretString {
+        SecretString::from("test-secret".to_string())
+    }
+
     #[test]
     fn test_compute_and_verify_hash() -> Result<()> {
+        let secret = test_secret();
         let test_path = "my/test/path".to_string();
-        let hash = compute_hash(test_path.clone())?;
-        verify_hash(hash, SecretString::from(test_path))?;
+        let hash = compute_hash(test_path.clone(), &secret)?;
+        verify_hash(hash, SecretString::from(test_path), &secret)?;
         Ok(())
     }
 
     #[test]
     fn test_verify_hash_with_invalid_input() {
+        let secret = test_secret();
         let test_path = "my/test/path".to_string();
-        let hash = compute_hash(test_path).unwrap();
-        let result = verify_hash(hash, SecretString::from("wrong/path".to_string()));
+        let hash = compute_hash(test_path, &secret).unwrap();
+        let result = verify_hash(hash, SecretString::from("wrong/path".to_string()), &secret);
         assert!(result.is_err());
         if let Err(e) = result {
             assert!(matches!(e, AuthError::InvalidCredentials(_)));
@@ -124,20 +127,24 @@ mod tests {
 
     #[test]
     fn test_verify_hash_with_invalid_hash_format() {
+        let secret = test_secret();
         let result = verify_hash(
             SecretString::from("not-a-valid-hash-format".to_string()),
             SecretString::from("some/path".to_string()),
+            &secret,
         );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_hash_consistency() -> Result<()> {
+        let secret = test_secret();
         let test_path = "consistent/test/path".to_string();
-        let hash1 = compute_hash(test_path.clone())?;
-        let hash2 = compute_hash(test_path.clone())?;
-        verify_hash(hash1, SecretString::from(test_path.clone()))?;
-        verify_hash(hash2, SecretString::from(test_path))?;
+        let hash1 = compute_hash(test_path.clone(), &secret)?;
+        let hash2 = compute_hash(test_path.clone(), &secret)?;
+        assert_eq!(hash1.expose_secret(), hash2.expose_secret());
+        verify_hash(hash1, SecretString::from(test_path.clone()), &secret)?;
+        verify_hash(hash2, SecretString::from(test_path), &secret)?;
         Ok(())
     }
 

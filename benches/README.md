@@ -42,7 +42,7 @@ Benchmarks parameter parsing and URL handling:
 Tests cryptographic and hashing operations:
 - **SHA1 Hashing**: Storage path hashing for different input sizes
 - **Parameter Hashing**: Hash generation from audio processing parameters
-- **Argon2 Operations**: Password hashing and verification
+- **HMAC-SHA256 Operations**: URL signature verification
 - **Hash Consistency**: Ensuring identical inputs produce identical hashes
 - **Collision Resistance**: Testing hash uniqueness for similar inputs
 
@@ -164,7 +164,7 @@ audio_buffer_creation           fastest    │ slowest    │ median     │ mea
 #### Hash Operations
 - SHA1 hashing: > 100 MB/s throughput
 - Parameter hashing: < 10µs
-- Argon2 operations: 10-50ms (security vs performance trade-off)
+- HMAC-SHA256 operations: < 10µs (vs 20ms for Argon2)
 
 #### Storage Operations
 - Cache hits: < 1ms

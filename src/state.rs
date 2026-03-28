@@ -1,5 +1,6 @@
 use crate::{cache::AudioCache, processor::AudioProcessor, storage::AudioStorage};
 use reqwest::Client;
+use secrecy::SecretString;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -22,4 +23,5 @@ pub struct AppStateDyn {
     pub cache: Arc<dyn AudioCache>,
     pub http_client: Client,
     pub web_config: Option<WebConfig>,
+    pub hmac_secret: SecretString,
 }

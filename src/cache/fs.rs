@@ -12,7 +12,6 @@ use tracing::{debug, warn};
 #[derive(Debug, Clone)]
 pub struct FileSystemCache {
     base_path: PathBuf,
-    max_size_bytes: u64,
     evict_notify: Arc<Notify>,
 }
 
@@ -38,7 +37,6 @@ impl FileSystemCache {
 
         Ok(FileSystemCache {
             base_path,
-            max_size_bytes,
             evict_notify,
         })
     }

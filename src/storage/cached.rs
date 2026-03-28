@@ -15,7 +15,6 @@ use crate::storage::AudioStorage;
 pub struct CachedStorage<S> {
     inner: S,
     cache_dir: PathBuf,
-    max_size_bytes: u64,
     evict_notify: Arc<Notify>,
 }
 
@@ -41,7 +40,6 @@ impl<S: AudioStorage + Clone + Send + Sync + 'static> CachedStorage<S> {
         Self {
             inner,
             cache_dir,
-            max_size_bytes,
             evict_notify,
         }
     }

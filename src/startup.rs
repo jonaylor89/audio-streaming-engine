@@ -26,6 +26,7 @@ use axum::routing::get;
 use axum::{Router, serve::Serve};
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, eyre};
+use secrecy::SecretString;
 #[cfg(feature = "s3")]
 use secrecy::ExposeSecret;
 use std::future::ready;
@@ -109,9 +110,27 @@ impl Application {
                         "local source cache enabled for S3"
                     );
                     let cached = CachedStorage::new(storage, cache_settings);
-                    run(listener, cached, processor, cache, web_ui, web_config).await?
+                    run(
+                        listener,
+                        cached,
+                        processor,
+                        cache,
+                        web_ui,
+                        web_config,
+                        config.application.hmac_secret.clone(),
+                    )
+                    .await?
                 } else {
-                    run(listener, storage, processor, cache, web_ui, web_config).await?
+                    run(
+                        listener,
+                        storage,
+                        processor,
+                        cache,
+                        web_ui,
+                        web_config,
+                        config.application.hmac_secret.clone(),
+                    )
+                    .await?
                 }
             }
             #[cfg(feature = "gcs")]
@@ -133,9 +152,27 @@ impl Application {
                         "local source cache enabled for GCS"
                     );
                     let cached = CachedStorage::new(storage, cache_settings);
-                    run(listener, cached, processor, cache, web_ui, web_config).await?
+                    run(
+                        listener,
+                        cached,
+                        processor,
+                        cache,
+                        web_ui,
+                        web_config,
+                        config.application.hmac_secret.clone(),
+                    )
+                    .await?
                 } else {
-                    run(listener, storage, processor, cache, web_ui, web_config).await?
+                    run(
+                        listener,
+                        storage,
+                        processor,
+                        cache,
+                        web_ui,
+                        web_config,
+                        config.application.hmac_secret.clone(),
+                    )
+                    .await?
                 }
             }
             #[cfg(feature = "filesystem")]
@@ -147,7 +184,16 @@ impl Application {
                     config.storage.safe_chars,
                 );
 
-                run(listener, storage, processor, cache, web_ui, web_config).await?
+                run(
+                    listener,
+                    storage,
+                    processor,
+                    cache,
+                    web_ui,
+                    web_config,
+                    config.application.hmac_secret.clone(),
+                )
+                .await?
             }
             #[cfg(not(any(feature = "s3", feature = "gcs", feature = "filesystem")))]
             _ => {
@@ -195,6 +241,7 @@ async fn run<S, P, C>(
     cache: C,
     web_ui: bool,
     web_config: Option<WebConfig>,
+    hmac_secret: SecretString,
 ) -> Result<Serve<TcpListener, Router, Router>>
 where
     S: AudioStorage + Clone + Send + Sync + 'static,
@@ -215,6 +262,7 @@ where
         cache: Arc::new(cache.clone()),
         http_client,
         web_config,
+        hmac_secret,
     };
 
     let mut app = Router::new()

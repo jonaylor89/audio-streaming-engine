@@ -24,3 +24,5 @@ cache/
 req_cache/
 testdata/
 server.log
+
+.claude/

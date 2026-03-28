@@ -196,8 +196,6 @@ mod end_to_end_pipeline {
 
         let storage = FileStorage::new(storage_dir, "audio".to_string(), SafeCharsType::Default);
 
-        let cache = FileSystemCache::new(&cache_dir).unwrap();
-
         let audio_data = generate_realistic_audio_data(size_kb, input_format);
         let input_buffer = AudioBuffer::from_bytes_with_format(audio_data, input_format);
         let params = create_realistic_params(scenario);
@@ -205,6 +203,7 @@ mod end_to_end_pipeline {
         bencher.bench(|| {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
+                let cache = FileSystemCache::new(&cache_dir, 1000).unwrap();
                 // 1. Hash computation for cache key
                 let cache_key = digest_storage_hasher(&params.key);
 
@@ -266,8 +265,6 @@ mod concurrent_streaming {
             SafeCharsType::Default,
         ));
 
-        let cache = Arc::new(FileSystemCache::new(&cache_dir).unwrap());
-
         // Prepare test data for each concurrent request
         let test_scenarios = [
             ("podcast", AudioFormat::Mp3, 25),
@@ -281,6 +278,7 @@ mod concurrent_streaming {
         bencher.bench(|| {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
+                let cache = Arc::new(FileSystemCache::new(&cache_dir, 1000).unwrap());
                 let tasks = (0..concurrency).map(|i| {
                     let processor = Arc::clone(&processor);
                     let storage = Arc::clone(&storage);
@@ -346,20 +344,21 @@ mod cache_performance_patterns {
     #[divan::bench(args = [10, 25, 50, 100])]
     fn cache_hit_ratio_simulation(bencher: Bencher<'_, '_>, num_unique_files: usize) {
         let temp_dir = tempdir().unwrap();
-        let cache = FileSystemCache::new(temp_dir.path()).unwrap();
 
         // Pre-populate cache with some files (simulate 50% cache hit ratio)
         let rt = tokio::runtime::Runtime::new().unwrap();
-        for i in 0..num_unique_files / 2 {
-            let data = generate_realistic_audio_data(50, AudioFormat::Mp3);
-            let key = format!("cached_file_{}", i);
-            rt.block_on(async {
+        let cache = rt.block_on(async {
+            let cache = FileSystemCache::new(temp_dir.path(), 1000).unwrap();
+            for i in 0..num_unique_files / 2 {
+                let data = generate_realistic_audio_data(50, AudioFormat::Mp3);
+                let key = format!("cached_file_{}", i);
                 cache
                     .set(&key, &data, Some(Duration::from_secs(3600)))
                     .await
                     .unwrap();
-            });
-        }
+            }
+            cache
+        });
 
         bencher.bench(|| {
             // Simulate realistic access pattern (80% requests to popular files)
@@ -407,17 +406,19 @@ mod cache_hot_cold_paths {
     #[divan::bench]
     fn cache_hit_only(bencher: Bencher<'_, '_>) {
         let temp_dir = tempdir().unwrap();
-        let cache = FileSystemCache::new(temp_dir.path()).unwrap();
-        let key = "fixture-hit";
-        let payload: &[u8] = (&*SAMPLE_MP3_FIXTURE).as_ref();
         let rt = tokio::runtime::Runtime::new().unwrap();
+        let cache = rt.block_on(async {
+            let cache = FileSystemCache::new(temp_dir.path(), 1000).unwrap();
+            let key = "fixture-hit";
+            let payload: &[u8] = (&*SAMPLE_MP3_FIXTURE).as_ref();
 
-        rt.block_on(async {
             cache
                 .set(key, payload, Some(Duration::from_secs(3600)))
                 .await
                 .unwrap();
+            cache
         });
+        let key = "fixture-hit";
 
         bencher.bench(|| rt.block_on(async { black_box(cache.get(key).await) }))
     }
@@ -431,10 +432,10 @@ mod cache_hot_cold_paths {
         std::fs::create_dir_all(&cache_dir).unwrap();
         std::fs::create_dir_all(&storage_dir).unwrap();
 
-        let cache = FileSystemCache::new(&cache_dir).unwrap();
         let storage = FileStorage::new(storage_dir, "audio".to_string(), SafeCharsType::Default);
         let processor = build_processor();
         let rt = tokio::runtime::Runtime::new().unwrap();
+        let cache = rt.block_on(async { FileSystemCache::new(&cache_dir, 1000).unwrap() });
         let params = Params {
             key: "sample1.mp3".to_string(),
             format: Some(AudioFormat::Wav),
@@ -594,9 +595,9 @@ mod error_recovery_patterns {
     #[divan::bench]
     fn cache_failure_recovery() -> color_eyre::Result<()> {
         let temp_dir = tempdir().unwrap();
-        let cache = FileSystemCache::new(temp_dir.path()).unwrap();
-
         let rt = tokio::runtime::Runtime::new().unwrap();
+        let cache = rt.block_on(async { FileSystemCache::new(temp_dir.path(), 1000).unwrap() });
+
         rt.block_on(async {
             // Simulate cache misses and expired entries
             for i in 0..20 {

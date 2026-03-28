@@ -17,6 +17,7 @@ use streaming_engine::{
 };
 
 // Generate test data for hashing operations
+#[allow(dead_code)]
 fn generate_test_paths() -> Vec<(&'static str, String)> {
     vec![
         ("short", "test.mp3".to_string()),
@@ -30,6 +31,7 @@ fn generate_test_paths() -> Vec<(&'static str, String)> {
     ]
 }
 
+#[allow(dead_code)]
 fn create_test_params() -> Vec<(&'static str, Params)> {
     vec![
         (
@@ -313,59 +315,82 @@ mod params_hashing {
     }
 }
 
-mod argon2_operations {
+mod hmac_operations {
     use super::*;
+
+    fn get_secret() -> SecretString {
+        SecretString::from("bench-secret-key-that-is-long-enough-for-hmac".to_string())
+    }
 
     #[divan::bench]
     fn compute_hash_short() -> Result<SecretString, color_eyre::eyre::Error> {
-        black_box(compute_hash("test.mp3".to_string()))
+        let secret = get_secret();
+        black_box(compute_hash("test.mp3".to_string(), &secret))
     }
 
     #[divan::bench]
     fn compute_hash_medium() -> Result<SecretString, color_eyre::eyre::Error> {
-        black_box(compute_hash("path/to/audio/file.wav".to_string()))
+        let secret = get_secret();
+        black_box(compute_hash("path/to/audio/file.wav".to_string(), &secret))
     }
 
     #[divan::bench]
     fn compute_hash_long() -> Result<SecretString, color_eyre::eyre::Error> {
+        let secret = get_secret();
         black_box(compute_hash(
             "very/long/path/to/audio/file/with/many/segments/and/a/very/long/filename.flac"
                 .to_string(),
+            &secret,
         ))
     }
 
     #[divan::bench]
     fn verify_hash_short(bencher: Bencher<'_, '_>) {
+        let secret = get_secret();
         let path = "test.mp3";
-        let hash = compute_hash(path.to_string()).unwrap();
+        let hash = compute_hash(path.to_string(), &secret).unwrap();
         let path_secret = SecretString::from(path.to_string());
 
         bencher.bench(|| {
-            let result = verify_hash(black_box(hash.clone()), black_box(path_secret.clone()));
+            let result = verify_hash(
+                black_box(hash.clone()),
+                black_box(path_secret.clone()),
+                &secret,
+            );
             black_box(result)
         })
     }
 
     #[divan::bench]
     fn verify_hash_medium(bencher: Bencher<'_, '_>) {
+        let secret = get_secret();
         let path = "path/to/audio/file.wav";
-        let hash = compute_hash(path.to_string()).unwrap();
+        let hash = compute_hash(path.to_string(), &secret).unwrap();
         let path_secret = SecretString::from(path.to_string());
 
         bencher.bench(|| {
-            let result = verify_hash(black_box(hash.clone()), black_box(path_secret.clone()));
+            let result = verify_hash(
+                black_box(hash.clone()),
+                black_box(path_secret.clone()),
+                &secret,
+            );
             black_box(result)
         })
     }
 
     #[divan::bench]
     fn verify_hash_long(bencher: Bencher<'_, '_>) {
+        let secret = get_secret();
         let path = "very/long/path/to/audio/file/with/many/segments/and/a/very/long/filename.flac";
-        let hash = compute_hash(path.to_string()).unwrap();
+        let hash = compute_hash(path.to_string(), &secret).unwrap();
         let path_secret = SecretString::from(path.to_string());
 
         bencher.bench(|| {
-            let result = verify_hash(black_box(hash.clone()), black_box(path_secret.clone()));
+            let result = verify_hash(
+                black_box(hash.clone()),
+                black_box(path_secret.clone()),
+                &secret,
+            );
             black_box(result)
         })
     }

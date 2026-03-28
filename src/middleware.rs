@@ -87,7 +87,7 @@ pub async fn cache_middleware(
 }
 
 pub async fn auth_middleware(
-    State(_): State<AppStateDyn>,
+    State(state): State<AppStateDyn>,
     params: Params,
     req: Request,
     next: Next,
@@ -103,8 +103,12 @@ pub async fn auth_middleware(
         .ok_or_else(|| e400(eyre!("Failed to parse URI hash")))?;
 
     if hash != "unsafe" {
-        verify_hash(hash.to_owned().into(), path.to_owned().into())
-            .map_err(|e| e400(eyre!("Failed to verify hash: {}", e)))?;
+        verify_hash(
+            hash.to_owned().into(),
+            path.to_owned().into(),
+            &state.hmac_secret,
+        )
+        .map_err(|e| e400(eyre!("Failed to verify hash: {}", e)))?;
     }
 
     Ok(next.run(req).await)

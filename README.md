@@ -1,4 +1,4 @@
-# Streaming Engine
+# Audio Streaming Engine
 
 On-the-fly audio processing server. Think [Thumbor](https://github.com/thumbor/thumbor) / [Imagor](https://github.com/cshum/imagor), but for audio.
 
