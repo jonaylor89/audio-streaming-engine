@@ -1,8 +1,10 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use color_eyre::Result;
 use tokio::fs;
+use tokio::sync::Notify;
 use tracing::{debug, warn};
 
 use crate::blob::AudioBuffer;
@@ -14,14 +16,33 @@ pub struct CachedStorage<S> {
     inner: S,
     cache_dir: PathBuf,
     max_size_bytes: u64,
+    evict_notify: Arc<Notify>,
 }
 
-impl<S: AudioStorage> CachedStorage<S> {
+impl<S: AudioStorage + Clone + Send + Sync + 'static> CachedStorage<S> {
     pub fn new(inner: S, settings: &LocalCacheSettings) -> Self {
+        let cache_dir = PathBuf::from(&settings.base_dir);
+        let max_size_bytes = settings.max_size_mb * 1024 * 1024;
+        let evict_notify = Arc::new(Notify::new());
+
+        // Spawn background eviction task
+        let bg_dir = cache_dir.clone();
+        let bg_max = max_size_bytes;
+        let bg_notify = evict_notify.clone();
+        tokio::spawn(async move {
+            loop {
+                bg_notify.notified().await;
+                if let Err(e) = run_eviction(&bg_dir, bg_max).await {
+                    warn!(error = %e, "background eviction failed");
+                }
+            }
+        });
+
         Self {
             inner,
-            cache_dir: PathBuf::from(&settings.base_dir),
-            max_size_bytes: settings.max_size_mb * 1024 * 1024,
+            cache_dir,
+            max_size_bytes,
+            evict_notify,
         }
     }
 
@@ -50,61 +71,59 @@ impl<S: AudioStorage> CachedStorage<S> {
             }
         }
 
-        if let Err(e) = self.maybe_evict().await {
-            warn!(error = %e, "failed to evict local cache entries");
-        }
-
         if let Err(e) = fs::write(&path, blob.as_ref()).await {
             warn!(key, error = %e, "failed to write to local cache");
         } else {
             debug!(key, "cached source blob locally");
         }
-    }
 
-    async fn maybe_evict(&self) -> Result<()> {
-        let cache_dir = &self.cache_dir;
-        if !cache_dir.exists() {
-            return Ok(());
-        }
-
-        let mut entries = Vec::new();
-        let mut total_size: u64 = 0;
-        let mut dir = fs::read_dir(cache_dir).await?;
-        while let Some(entry) = dir.next_entry().await? {
-            if let Ok(meta) = entry.metadata().await {
-                if meta.is_file() {
-                    let size = meta.len();
-                    let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                    total_size += size;
-                    entries.push((entry.path(), size, modified));
-                }
-            }
-        }
-
-        if total_size <= self.max_size_bytes {
-            return Ok(());
-        }
-
-        // Evict oldest first
-        entries.sort_by_key(|(_, _, modified)| *modified);
-        for (path, size, _) in &entries {
-            if total_size <= self.max_size_bytes {
-                break;
-            }
-            debug!(path = %path.display(), "evicting cached source blob");
-            if let Err(e) = fs::remove_file(path).await {
-                warn!(path = %path.display(), error = %e, "failed to evict cached file");
-            } else {
-                total_size -= size;
-            }
-        }
-
-        Ok(())
+        // Signal background eviction (non-blocking)
+        self.evict_notify.notify_one();
     }
 }
 
+async fn run_eviction(cache_dir: &PathBuf, max_size_bytes: u64) -> Result<()> {
+    if !cache_dir.exists() {
+        return Ok(());
+    }
+
+    let mut entries = Vec::new();
+    let mut total_size: u64 = 0;
+    let mut dir = fs::read_dir(cache_dir).await?;
+    while let Some(entry) = dir.next_entry().await? {
+        if let Ok(meta) = entry.metadata().await {
+            if meta.is_file() {
+                let size = meta.len();
+                let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                total_size += size;
+                entries.push((entry.path(), size, modified));
+            }
+        }
+    }
+
+    if total_size <= max_size_bytes {
+        return Ok(());
+    }
+
+    // Evict oldest first
+    entries.sort_by_key(|(_, _, modified)| *modified);
+    for (path, size, _) in &entries {
+        if total_size <= max_size_bytes {
+            break;
+        }
+        debug!(path = %path.display(), "evicting cached source blob");
+        if let Err(e) = fs::remove_file(path).await {
+            warn!(path = %path.display(), error = %e, "failed to evict cached file");
+        } else {
+            total_size -= size;
+        }
+    }
+
+    Ok(())
+}
+
 #[async_trait]
-impl<S: AudioStorage> AudioStorage for CachedStorage<S> {
+impl<S: AudioStorage + Clone + Send + Sync + 'static> AudioStorage for CachedStorage<S> {
     async fn get(&self, key: &str) -> Result<AudioBuffer> {
         if let Some(blob) = self.read_from_cache(key).await {
             return Ok(blob);
