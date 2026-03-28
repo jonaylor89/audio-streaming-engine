@@ -3,10 +3,9 @@ fn main() {
 }
 
 use divan::{Bencher, black_box};
-use once_cell::sync::Lazy;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use streaming_engine::{
     blob::{AudioBuffer, AudioFormat},
@@ -22,7 +21,7 @@ use streaming_engine::{
 };
 use tempfile::tempdir;
 
-static SAMPLE_MP3_FIXTURE: Lazy<AudioBuffer> = Lazy::new(|| {
+static SAMPLE_MP3_FIXTURE: LazyLock<AudioBuffer> = LazyLock::new(|| {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("uploads/sample1.mp3");
     let bytes = fs::read(path).expect("sample fixture should exist");
     AudioBuffer::from_bytes_with_format(bytes, AudioFormat::Mp3)

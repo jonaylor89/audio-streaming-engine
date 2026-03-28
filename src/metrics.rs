@@ -4,14 +4,14 @@ use axum::{
     response::IntoResponse,
 };
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 use tokio::time::Instant;
 
 pub fn setup_metrics_recorder() -> PrometheusHandle {
     const EXPONENTIAL_SECONDS: &[f64] = &[
         0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
     ];
-    static METRICS_HANDLE: OnceCell<PrometheusHandle> = OnceCell::new();
+    static METRICS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
     METRICS_HANDLE
         .get_or_init(|| {
