@@ -15,6 +15,7 @@ network = []
 
 [dependencies]
 ffmpeg-sys = { path = "../ffmpeg-sys" }
+bytes = "1"
 thiserror = "1.0"
 libc = "0.2"
 tracing = "0.1"

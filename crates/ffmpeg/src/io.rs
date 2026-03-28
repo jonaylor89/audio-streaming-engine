@@ -13,12 +13,12 @@ const AVIO_BUFFER_SIZE: usize = 32 * 1024; // 32KB buffer
 
 /// Read buffer for in-memory input.
 pub struct ReadBuffer {
-    data: Vec<u8>,
+    data: bytes::Bytes,
     pos: usize,
 }
 
 impl ReadBuffer {
-    pub fn new(data: Vec<u8>) -> Self {
+    pub fn new(data: bytes::Bytes) -> Self {
         Self { data, pos: 0 }
     }
 }
@@ -112,7 +112,7 @@ pub struct InputContext {
 }
 
 impl InputContext {
-    pub fn open(data: Vec<u8>) -> Result<Self, FfmpegError> {
+    pub fn open(data: bytes::Bytes) -> Result<Self, FfmpegError> {
         let mut read_buf = Box::new(ReadBuffer::new(data));
 
         // Allocate AVIO buffer

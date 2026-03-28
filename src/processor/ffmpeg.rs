@@ -137,8 +137,8 @@ pub async fn process_audio(input: &AudioBuffer, params: &Params) -> Result<Audio
     // Build output format
     let output_spec = audio_format_to_output(output_format, params);
 
-    // Get input data
-    let input_data = input.clone();
+    // Get input data (Bytes::clone is just an Arc bump — zero-copy)
+    let input_bytes = input.clone().into_bytes();
     let start_time = params.start_time;
     let duration = params.duration;
 
@@ -146,7 +146,7 @@ pub async fn process_audio(input: &AudioBuffer, params: &Params) -> Result<Audio
     let processed = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ffmpeg::FfmpegError> {
         let processor = AudioProcessor::new()?;
         processor.process(ProcessOptions {
-            input: input_data.as_ref(),
+            input: input_bytes,
             output_format: output_spec,
             filters,
             metadata: &metadata,

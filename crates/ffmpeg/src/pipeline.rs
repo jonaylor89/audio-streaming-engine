@@ -59,7 +59,7 @@ impl OutputFormat {
 #[derive(Debug)]
 pub struct ProcessOptions<'a> {
     /// Input audio data
-    pub input: &'a [u8],
+    pub input: bytes::Bytes,
     /// Output format specification
     pub output_format: OutputFormat,
     /// Filter graph string (e.g., "volume=0.5,atempo=1.2")
@@ -89,7 +89,7 @@ impl AudioProcessor {
     #[instrument(skip(self, opts), fields(input_size = opts.input.len()))]
     pub fn process(&self, opts: ProcessOptions<'_>) -> Result<Vec<u8>, FfmpegError> {
         // Open input
-        let input = InputContext::open(opts.input.to_vec())?;
+        let input = InputContext::open(opts.input)?;
         let audio_stream_idx = input.find_audio_stream()?;
         let stream = input.stream(audio_stream_idx);
 
