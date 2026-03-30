@@ -1,23 +1,34 @@
 use std::num::NonZeroUsize;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use color_eyre::Result;
+use futures::Stream;
 use tokio::sync::Semaphore;
 use tracing::{info, instrument};
 
 use crate::{
-    blob::AudioBuffer, config::ProcessorSettings, processor::ffmpeg::process_audio,
+    blob::AudioBuffer, config::ProcessorSettings,
+    processor::ffmpeg::{process_audio, process_audio_streaming},
     streamingpath::params::Params,
 };
 
 #[async_trait]
 pub trait AudioProcessor: Send + Sync {
     async fn process(&self, blob: &AudioBuffer, params: &Params) -> Result<AudioBuffer>;
+
+    async fn process_streaming(
+        &self,
+        blob: &AudioBuffer,
+        params: &Params,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>>;
 }
 
 #[derive(Debug)]
 pub struct Processor {
-    semaphore: Semaphore,
+    semaphore: Arc<Semaphore>,
 }
 
 #[async_trait]
@@ -31,6 +42,17 @@ impl AudioProcessor for Processor {
         info!("Audio processing completed successfully");
 
         Ok(processed_audio)
+    }
+
+    #[tracing::instrument(skip(self, blob, params))]
+    async fn process_streaming(
+        &self,
+        blob: &AudioBuffer,
+        params: &Params,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
+        let permit = self.semaphore.clone().acquire_owned().await?;
+        info!(params = ?params, "Starting streaming FFmpeg processing");
+        process_audio_streaming(blob, params, permit).await
     }
 }
 
@@ -53,7 +75,7 @@ impl Processor {
         );
 
         Self {
-            semaphore: Semaphore::new(max_concurrent.get()),
+            semaphore: Arc::new(Semaphore::new(max_concurrent.get())),
         }
     }
 }

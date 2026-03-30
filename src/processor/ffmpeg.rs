@@ -1,4 +1,8 @@
+use std::pin::Pin;
+
+use bytes::Bytes;
 use color_eyre::Result;
+use futures::Stream;
 use tracing::instrument;
 
 use crate::{
@@ -160,6 +164,84 @@ pub async fn process_audio(input: &AudioBuffer, params: &Params) -> Result<Audio
         processed,
         output_format,
     ))
+}
+
+#[instrument(skip(input, params, permit))]
+pub async fn process_audio_streaming(
+    input: &AudioBuffer,
+    params: &Params,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> color_eyre::Result<Pin<Box<dyn Stream<Item = color_eyre::Result<Bytes>> + Send>>> {
+    use std::sync::mpsc;
+
+    if is_passthrough_request(input, params) {
+        let bytes = input.clone().into_bytes();
+        return Ok(Box::pin(futures::stream::once(async move { Ok(bytes) })));
+    }
+
+    let output_format = params.format.unwrap_or(AudioFormat::Mp3);
+    let metadata = params.tags.clone().unwrap_or_default();
+    let filters = collect_filters(params);
+    let output_spec = audio_format_to_output(output_format, params);
+    let input_bytes = input.clone().into_bytes();
+    let start_time = params.start_time;
+    let duration = params.duration;
+
+    // Bounded sync channel: provides backpressure so FFmpeg blocks when the
+    // HTTP consumer is slow, preventing unbounded buffering.
+    let (std_tx, std_rx) = mpsc::sync_channel::<Bytes>(8);
+
+    // Bridge: drain the std::sync channel from a spawn_blocking task and forward
+    // to a tokio channel that the async stream can consume.
+    let (tokio_tx, tokio_rx) = tokio::sync::mpsc::channel::<color_eyre::Result<Bytes>>(8);
+    let bridge_tx = tokio_tx;
+    tokio::task::spawn_blocking(move || {
+        while let Ok(chunk) = std_rx.recv() {
+            if bridge_tx.blocking_send(Ok(chunk)).is_err() {
+                // Receiver dropped (client disconnected) — stop bridge.
+                return;
+            }
+        }
+        // std_rx.recv() returning Err means std_tx was dropped: FFmpeg finished.
+    });
+
+    // FFmpeg pipeline runs in spawn_blocking; sends chunks via std_tx.
+    // The semaphore permit is held for the duration of FFmpeg processing.
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let processor = match ffmpeg::AudioProcessor::new() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("Failed to create FFmpeg processor: {}", e);
+                // std_tx dropped here → bridge sees EOF → stream ends
+                return;
+            }
+        };
+        if let Err(e) = processor.process_streaming(
+            ffmpeg::ProcessOptions {
+                input: input_bytes,
+                output_format: output_spec,
+                filters,
+                metadata: &metadata,
+                start_time,
+                duration,
+            },
+            std_tx,
+        ) {
+            // process_streaming returned an error. std_tx has already been moved
+            // into StreamingOutputContext (and dropped on return), so the bridge
+            // sees EOF. The stream will end without an explicit error item.
+            // This means mid-stream errors cause a truncated response — acceptable
+            // for the initial streaming implementation.
+            tracing::error!("FFmpeg streaming error: {}", e);
+        }
+    });
+
+    let stream = futures::stream::unfold(tokio_rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+
+    Ok(Box::pin(stream))
 }
 
 #[cfg(test)]
