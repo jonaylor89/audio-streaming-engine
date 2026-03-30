@@ -7,6 +7,12 @@ storage:
   path_prefix: ""
   safe_chars: "default"
 
+# result_storage: optional separate backend for processed audio results.
+# If omitted, results are stored in the same backend as `storage`.
+# Accepts the same fields as `storage` (base_dir, path_prefix, safe_chars, client).
+# result_storage:
+#   base_dir: "results"
+
 processor:
   disabled_filters: []
   max_filter_ops: 256

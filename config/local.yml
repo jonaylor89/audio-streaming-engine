@@ -6,6 +6,10 @@ storage:
   base_dir: "uploads"
   path_prefix: ""
 
+result_storage:
+  base_dir: "results"
+  path_prefix: ""
+
 processor:
   max_filter_ops: 256
   max_cache_files: 1000

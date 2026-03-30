@@ -23,6 +23,7 @@ cache/
 !src/cache/**
 req_cache/
 testdata/
+results/
 server.log
 
 .claude/

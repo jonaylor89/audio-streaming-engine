@@ -214,7 +214,10 @@ mod tests {
         let _ = cached.get("a.mp3").await.unwrap();
         let _ = cached.get("b.mp3").await.unwrap();
 
-        // Cache dir should have at most 1 file (the latest) since eviction runs before writes
+        // Yield to let the background eviction task run after the notify
+        tokio::task::yield_now().await;
+
+        // Cache dir should have at most 1 file (the latest) since eviction runs after writes
         let mut count = 0;
         let mut dir = fs::read_dir(temp.path()).await.unwrap();
         while dir.next_entry().await.unwrap().is_some() {

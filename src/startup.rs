@@ -1,5 +1,5 @@
 use crate::cache::{AudioCache, Cache};
-use crate::config::{Settings, StorageClient};
+use crate::config::{Settings, StorageClient, StorageSettings};
 use crate::metrics::{setup_metrics_recorder, track_metrics};
 use crate::middleware::auth_middleware;
 use crate::middleware::cache_middleware;
@@ -83,139 +83,28 @@ impl Application {
         let processor = Processor::new(config.processor);
         let cache = Cache::new(config.cache).await?;
 
-        let server = match config.storage.client {
-            #[cfg(feature = "s3")]
-            Some(StorageClient::S3(s3_settings)) => {
-                info!("Using S3 storage");
-                let local_cache = s3_settings.local_cache.clone();
-                let storage = S3Storage::new(
-                    config.storage.base_dir,
-                    config.storage.path_prefix,
-                    config.storage.safe_chars,
-                    s3_settings.endpoint,
-                    s3_settings.region,
-                    s3_settings.bucket,
-                    s3_settings.access_key.expose_secret(),
-                    s3_settings.secret_key.expose_secret(),
-                )
-                .await?;
+        info!("initializing source storage");
+        let storage = build_storage(config.storage).await?;
 
-                // Ensure bucket exists
-                storage.ensure_bucket_exists().await?;
-
-                if let Some(ref cache_settings) = local_cache {
-                    info!(
-                        base_dir = cache_settings.base_dir,
-                        max_size_mb = cache_settings.max_size_mb,
-                        "local source cache enabled for S3"
-                    );
-                    let cached = CachedStorage::new(storage, cache_settings);
-                    run(
-                        listener,
-                        cached,
-                        processor,
-                        cache,
-                        web_ui,
-                        web_config,
-                        config.application.hmac_secret.clone(),
-                    )
-                    .await?
-                } else {
-                    run(
-                        listener,
-                        storage,
-                        processor,
-                        cache,
-                        web_ui,
-                        web_config,
-                        config.application.hmac_secret.clone(),
-                    )
-                    .await?
-                }
-            }
-            #[cfg(feature = "gcs")]
-            Some(StorageClient::GCS(gcs_settings)) => {
-                info!("using GCS storage");
-                let local_cache = gcs_settings.local_cache.clone();
-                let storage = GCloudStorage::new(
-                    config.storage.base_dir,
-                    config.storage.path_prefix,
-                    config.storage.safe_chars,
-                    gcs_settings.bucket,
-                )
-                .await;
-
-                if let Some(ref cache_settings) = local_cache {
-                    info!(
-                        base_dir = cache_settings.base_dir,
-                        max_size_mb = cache_settings.max_size_mb,
-                        "local source cache enabled for GCS"
-                    );
-                    let cached = CachedStorage::new(storage, cache_settings);
-                    run(
-                        listener,
-                        cached,
-                        processor,
-                        cache,
-                        web_ui,
-                        web_config,
-                        config.application.hmac_secret.clone(),
-                    )
-                    .await?
-                } else {
-                    run(
-                        listener,
-                        storage,
-                        processor,
-                        cache,
-                        web_ui,
-                        web_config,
-                        config.application.hmac_secret.clone(),
-                    )
-                    .await?
-                }
-            }
-            #[cfg(feature = "filesystem")]
-            None => {
-                info!("using filesystem storage");
-                let storage = FileStorage::new(
-                    PathBuf::from(config.storage.base_dir),
-                    config.storage.path_prefix,
-                    config.storage.safe_chars,
-                );
-
-                run(
-                    listener,
-                    storage,
-                    processor,
-                    cache,
-                    web_ui,
-                    web_config,
-                    config.application.hmac_secret.clone(),
-                )
-                .await?
-            }
-            #[cfg(not(any(feature = "s3", feature = "gcs", feature = "filesystem")))]
-            _ => {
-                return Err(eyre!(
-                    "No storage backend feature enabled. Enable one of: filesystem, gcs, s3"
-                ));
-            }
-            #[cfg(not(feature = "s3"))]
-            Some(StorageClient::S3(_)) => {
-                return Err(eyre!("S3 storage requested but s3 feature not enabled"));
-            }
-            #[cfg(not(feature = "gcs"))]
-            Some(StorageClient::GCS(_)) => {
-                return Err(eyre!("GCS storage requested but gcs feature not enabled"));
-            }
-            #[cfg(not(feature = "filesystem"))]
-            None => {
-                return Err(eyre!(
-                    "Filesystem storage requested but filesystem feature not enabled"
-                ));
-            }
+        let result_storage = if let Some(result_settings) = config.result_storage {
+            info!("initializing separate result storage");
+            build_storage(result_settings).await?
+        } else {
+            info!("result storage not configured, using source storage for results");
+            storage.clone()
         };
+
+        let server = run(
+            listener,
+            storage,
+            result_storage,
+            processor,
+            cache,
+            web_ui,
+            web_config,
+            config.application.hmac_secret.clone(),
+        )
+        .await?;
 
         Ok(Self { port, server })
     }
@@ -234,9 +123,91 @@ impl Application {
     }
 }
 
-async fn run<S, P, C>(
+async fn build_storage(settings: StorageSettings) -> Result<Arc<dyn AudioStorage>> {
+    match settings.client {
+        #[cfg(feature = "s3")]
+        Some(StorageClient::S3(s3_settings)) => {
+            info!("using S3 storage");
+            let local_cache = s3_settings.local_cache.clone();
+            let storage = S3Storage::new(
+                settings.base_dir,
+                settings.path_prefix,
+                settings.safe_chars,
+                s3_settings.endpoint,
+                s3_settings.region,
+                s3_settings.bucket,
+                s3_settings.access_key.expose_secret(),
+                s3_settings.secret_key.expose_secret(),
+            )
+            .await?;
+
+            storage.ensure_bucket_exists().await?;
+
+            if let Some(ref cache_settings) = local_cache {
+                info!(
+                    base_dir = cache_settings.base_dir,
+                    max_size_mb = cache_settings.max_size_mb,
+                    "local source cache enabled for S3"
+                );
+                Ok(Arc::new(CachedStorage::new(storage, cache_settings)))
+            } else {
+                Ok(Arc::new(storage))
+            }
+        }
+        #[cfg(feature = "gcs")]
+        Some(StorageClient::GCS(gcs_settings)) => {
+            info!("using GCS storage");
+            let local_cache = gcs_settings.local_cache.clone();
+            let storage = GCloudStorage::new(
+                settings.base_dir,
+                settings.path_prefix,
+                settings.safe_chars,
+                gcs_settings.bucket,
+            )
+            .await;
+
+            if let Some(ref cache_settings) = local_cache {
+                info!(
+                    base_dir = cache_settings.base_dir,
+                    max_size_mb = cache_settings.max_size_mb,
+                    "local source cache enabled for GCS"
+                );
+                Ok(Arc::new(CachedStorage::new(storage, cache_settings)))
+            } else {
+                Ok(Arc::new(storage))
+            }
+        }
+        #[cfg(feature = "filesystem")]
+        None => {
+            info!("using filesystem storage");
+            let storage = FileStorage::new(
+                PathBuf::from(settings.base_dir),
+                settings.path_prefix,
+                settings.safe_chars,
+            );
+            Ok(Arc::new(storage))
+        }
+        #[cfg(not(any(feature = "s3", feature = "gcs", feature = "filesystem")))]
+        _ => Err(eyre!(
+            "No storage backend feature enabled. Enable one of: filesystem, gcs, s3"
+        )),
+        #[cfg(not(feature = "s3"))]
+        Some(StorageClient::S3(_)) => Err(eyre!("S3 storage requested but s3 feature not enabled")),
+        #[cfg(not(feature = "gcs"))]
+        Some(StorageClient::GCS(_)) => {
+            Err(eyre!("GCS storage requested but gcs feature not enabled"))
+        }
+        #[cfg(not(feature = "filesystem"))]
+        None => Err(eyre!(
+            "Filesystem storage requested but filesystem feature not enabled"
+        )),
+    }
+}
+
+async fn run<P, C>(
     listener: TcpListener,
-    storage: S,
+    storage: Arc<dyn AudioStorage>,
+    result_storage: Arc<dyn AudioStorage>,
     processor: P,
     cache: C,
     web_ui: bool,
@@ -244,7 +215,6 @@ async fn run<S, P, C>(
     hmac_secret: SecretString,
 ) -> Result<Serve<TcpListener, Router, Router>>
 where
-    S: AudioStorage + Clone + Send + Sync + 'static,
     P: AudioProcessor + Send + Sync + 'static,
     C: AudioCache + Clone + Send + Sync + 'static,
 {
@@ -257,7 +227,8 @@ where
         .expect("Failed to build HTTP client");
 
     let state = AppStateDyn {
-        storage: Arc::new(storage.clone()),
+        storage,
+        result_storage,
         processor: Arc::new(processor),
         cache: Arc::new(cache.clone()),
         http_client,

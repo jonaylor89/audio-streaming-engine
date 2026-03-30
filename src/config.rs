@@ -20,8 +20,8 @@ pub struct Settings {
     pub application: ApplicationSettings,
     pub processor: ProcessorSettings,
 
-    // TODO: save audio to result bucket (diff from storage bucket)
     pub storage: StorageSettings,
+    pub result_storage: Option<StorageSettings>,
     pub cache: CacheSettings,
 }
 

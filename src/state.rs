@@ -19,6 +19,7 @@ pub struct WebConfig {
 #[derive(Clone)]
 pub struct AppStateDyn {
     pub storage: Arc<dyn AudioStorage>,
+    pub result_storage: Arc<dyn AudioStorage>,
     pub processor: Arc<dyn AudioProcessor>,
     pub cache: Arc<dyn AudioCache>,
     pub http_client: Client,
