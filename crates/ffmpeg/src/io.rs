@@ -454,3 +454,256 @@ extern "C" fn write_seek_callback(opaque: *mut c_void, offset: i64, whence: c_in
         Err(_) => -1,
     }
 }
+
+/// Trait for writing output — implemented by both `OutputContext` (buffered)
+/// and `StreamingOutputContext` (channel-based). This allows the pipeline to be
+/// generic over the output sink.
+pub(crate) trait OutputWrite {
+    fn add_audio_stream(&mut self, codec: *const AVCodec) -> Result<*mut AVStream, FfmpegError>;
+    fn set_metadata(&mut self, key: &str, value: &str) -> Result<(), FfmpegError>;
+    fn write_header(&mut self) -> Result<(), FfmpegError>;
+    fn write_packet(&mut self, pkt: *mut AVPacket) -> Result<(), FfmpegError>;
+    fn write_trailer(&mut self) -> Result<(), FfmpegError>;
+}
+
+impl OutputWrite for OutputContext {
+    fn add_audio_stream(&mut self, codec: *const AVCodec) -> Result<*mut AVStream, FfmpegError> {
+        let stream = unsafe { avformat_new_stream(self.format, codec) };
+        if stream.is_null() {
+            Err(FfmpegError::Allocation("AVStream"))
+        } else {
+            Ok(stream)
+        }
+    }
+
+    fn set_metadata(&mut self, key: &str, value: &str) -> Result<(), FfmpegError> {
+        let key_c = CString::new(key).unwrap();
+        let value_c = CString::new(value).unwrap();
+        check(
+            unsafe {
+                av_dict_set(
+                    &mut (*self.format).metadata,
+                    key_c.as_ptr(),
+                    value_c.as_ptr(),
+                    0,
+                )
+            },
+            "av_dict_set",
+        )?;
+        Ok(())
+    }
+
+    fn write_header(&mut self) -> Result<(), FfmpegError> {
+        check(
+            unsafe { avformat_write_header(self.format, ptr::null_mut()) },
+            "avformat_write_header",
+        )?;
+        self.header_written = true;
+        Ok(())
+    }
+
+    fn write_packet(&mut self, pkt: *mut AVPacket) -> Result<(), FfmpegError> {
+        check(
+            unsafe { av_interleaved_write_frame(self.format, pkt) },
+            "av_interleaved_write_frame",
+        )?;
+        Ok(())
+    }
+
+    fn write_trailer(&mut self) -> Result<(), FfmpegError> {
+        if self.header_written {
+            check(unsafe { av_write_trailer(self.format) }, "av_write_trailer")?;
+        }
+        Ok(())
+    }
+}
+
+/// Channel-backed writer: sends encoded bytes to a `SyncSender` as they are
+/// produced by FFmpeg, instead of accumulating them in a `Vec<u8>`.
+pub(crate) struct ChannelWriter {
+    sender: std::sync::mpsc::SyncSender<bytes::Bytes>,
+}
+
+/// RAII wrapper for AVIOContext used for streaming output via a channel.
+/// Suitable for container formats that write sequentially without seeking
+/// their output (MP3, OGG/Vorbis, OGG/Opus).
+pub struct StreamingOutputContext {
+    avio: *mut AVIOContext,
+    format: *mut AVFormatContext,
+    channel_writer: *mut ChannelWriter,
+    header_written: bool,
+}
+
+impl StreamingOutputContext {
+    pub fn open(
+        format_name: &str,
+        sender: std::sync::mpsc::SyncSender<bytes::Bytes>,
+    ) -> Result<Self, FfmpegError> {
+        let format_c = CString::new(format_name).unwrap();
+
+        let mut format: *mut AVFormatContext = ptr::null_mut();
+        check(
+            unsafe {
+                avformat_alloc_output_context2(
+                    &mut format,
+                    ptr::null_mut(),
+                    format_c.as_ptr(),
+                    ptr::null(),
+                )
+            },
+            "avformat_alloc_output_context2",
+        )?;
+
+        if format.is_null() {
+            return Err(FfmpegError::Unsupported(format!(
+                "output format '{}'",
+                format_name
+            )));
+        }
+
+        let channel_writer = Box::into_raw(Box::new(ChannelWriter { sender }));
+
+        let avio_buffer = unsafe { av_malloc(AVIO_BUFFER_SIZE) } as *mut u8;
+        if avio_buffer.is_null() {
+            unsafe {
+                avformat_free_context(format);
+                drop(Box::from_raw(channel_writer));
+            }
+            return Err(FfmpegError::Allocation("AVIO buffer"));
+        }
+
+        let avio = unsafe {
+            avio_alloc_context(
+                avio_buffer,
+                AVIO_BUFFER_SIZE as c_int,
+                1, // write mode
+                channel_writer as *mut c_void,
+                None,
+                Some(mem::transmute(
+                    channel_write_callback
+                        as unsafe extern "C" fn(*mut c_void, *const u8, c_int) -> c_int,
+                )),
+                Some(channel_write_seek_callback),
+            )
+        };
+        if avio.is_null() {
+            unsafe {
+                av_free(avio_buffer as *mut c_void);
+                avformat_free_context(format);
+                drop(Box::from_raw(channel_writer));
+            }
+            return Err(FfmpegError::Allocation("AVIOContext"));
+        }
+
+        unsafe { (*format).pb = avio };
+
+        Ok(Self {
+            avio,
+            format,
+            channel_writer,
+            header_written: false,
+        })
+    }
+
+    /// Flush the AVIO buffer. Dropping `self` after this will close the channel
+    /// (drop the sender), signalling EOF to the receiver.
+    pub fn flush(self) -> Result<(), FfmpegError> {
+        unsafe { avio_flush(self.avio) };
+        Ok(())
+        // self is dropped here → channel_writer dropped → sender dropped → receiver sees EOF
+    }
+}
+
+impl Drop for StreamingOutputContext {
+    fn drop(&mut self) {
+        unsafe {
+            avformat_free_context(self.format);
+            avio_context_free(&mut self.avio);
+            if !self.channel_writer.is_null() {
+                drop(Box::from_raw(self.channel_writer));
+            }
+        }
+    }
+}
+
+unsafe impl Send for StreamingOutputContext {}
+
+impl OutputWrite for StreamingOutputContext {
+    fn add_audio_stream(&mut self, codec: *const AVCodec) -> Result<*mut AVStream, FfmpegError> {
+        let stream = unsafe { avformat_new_stream(self.format, codec) };
+        if stream.is_null() {
+            Err(FfmpegError::Allocation("AVStream"))
+        } else {
+            Ok(stream)
+        }
+    }
+
+    fn set_metadata(&mut self, key: &str, value: &str) -> Result<(), FfmpegError> {
+        let key_c = CString::new(key).unwrap();
+        let value_c = CString::new(value).unwrap();
+        check(
+            unsafe {
+                av_dict_set(
+                    &mut (*self.format).metadata,
+                    key_c.as_ptr(),
+                    value_c.as_ptr(),
+                    0,
+                )
+            },
+            "av_dict_set",
+        )?;
+        Ok(())
+    }
+
+    fn write_header(&mut self) -> Result<(), FfmpegError> {
+        check(
+            unsafe { avformat_write_header(self.format, ptr::null_mut()) },
+            "avformat_write_header",
+        )?;
+        self.header_written = true;
+        Ok(())
+    }
+
+    fn write_packet(&mut self, pkt: *mut AVPacket) -> Result<(), FfmpegError> {
+        check(
+            unsafe { av_interleaved_write_frame(self.format, pkt) },
+            "av_interleaved_write_frame",
+        )?;
+        Ok(())
+    }
+
+    fn write_trailer(&mut self) -> Result<(), FfmpegError> {
+        if self.header_written {
+            check(unsafe { av_write_trailer(self.format) }, "av_write_trailer")?;
+        }
+        Ok(())
+    }
+}
+
+// FFI callbacks for streaming output
+unsafe extern "C" fn channel_write_callback(
+    opaque: *mut c_void,
+    buf: *const u8,
+    buf_size: c_int,
+) -> c_int {
+    let writer = unsafe { &mut *(opaque as *mut ChannelWriter) };
+    let slice = unsafe { slice::from_raw_parts(buf as *const u8, buf_size as usize) };
+    let chunk = bytes::Bytes::copy_from_slice(slice);
+    match writer.sender.send(chunk) {
+        Ok(()) => buf_size,
+        Err(_) => ffmpeg_sys::averror(libc::EIO as i32), // receiver dropped (client disconnected)
+    }
+}
+
+extern "C" fn channel_write_seek_callback(
+    _opaque: *mut c_void,
+    _offset: i64,
+    whence: c_int,
+) -> i64 {
+    // AVSEEK_SIZE: unknown size for streaming output
+    if whence & AVSEEK_SIZE as c_int != 0 {
+        return -1;
+    }
+    // Streaming output does not support seeking; MP3/OGG/Opus muxers never seek.
+    -1
+}

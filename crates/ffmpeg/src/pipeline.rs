@@ -5,11 +5,12 @@ use crate::handle::{
     find_decoder, find_encoder_by_name, get_filter, CodecContext, FilterGraph, Frame, Packet,
     Resampler,
 };
-use crate::io::{InputContext, OutputContext};
+use crate::io::{InputContext, OutputContext, OutputWrite, StreamingOutputContext};
 use ffmpeg_sys::*;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::ptr;
+use std::sync::mpsc;
 use tracing::{debug, instrument};
 
 /// Output format specification.
@@ -72,6 +73,26 @@ pub struct ProcessOptions<'a> {
     pub duration: Option<f64>,
 }
 
+/// Packaged decoder/encoder/filter state, ready to run against any output sink.
+struct PipelineContext {
+    input: InputContext,
+    audio_stream_idx: usize,
+    decoder: CodecContext,
+    encoder: CodecContext,
+    encoder_codec: *const AVCodec,
+    filter_graph: Option<FilterGraph>,
+    buffersrc_ctx: *mut AVFilterContext,
+    buffersink_ctx: *mut AVFilterContext,
+    resampler: Option<Resampler>,
+    metadata: HashMap<String, String>,
+    start_samples: Option<i64>,
+    end_samples: Option<i64>,
+}
+
+// Raw pointers are Send-safe in this context: the pipeline is only used from
+// within a single spawn_blocking task.
+unsafe impl Send for PipelineContext {}
+
 /// Audio processor using FFmpeg.
 pub struct AudioProcessor {
     // No state needed for now, but this allows future extension
@@ -85,9 +106,9 @@ impl AudioProcessor {
         Ok(Self {})
     }
 
-    /// Process audio data.
-    #[instrument(skip(self, opts), fields(input_size = opts.input.len()))]
-    pub fn process(&self, opts: ProcessOptions<'_>) -> Result<Vec<u8>, FfmpegError> {
+    /// Set up the decode/encode/filter pipeline from ProcessOptions.
+    /// Returns a `PipelineContext` ready to be run against any `OutputWrite`.
+    fn setup_pipeline(&self, opts: ProcessOptions<'_>) -> Result<PipelineContext, FfmpegError> {
         // Open input
         let input = InputContext::open(opts.input)?;
         let audio_stream_idx = input.find_audio_stream()?;
@@ -110,13 +131,11 @@ impl AudioProcessor {
         let encoder_codec = if let Some(ref codec_name) = opts.output_format.codec {
             find_encoder_by_name(codec_name)?
         } else {
-            // Default to MP3
             find_encoder_by_name("libmp3lame")?
         };
 
         let mut encoder = CodecContext::new(encoder_codec)?;
 
-        // Configure encoder
         let out_sample_rate = opts
             .output_format
             .sample_rate
@@ -127,13 +146,11 @@ impl AudioProcessor {
             den: out_sample_rate,
         });
 
-        // Set channel layout
         let out_channels = opts
             .output_format
             .channels
             .unwrap_or_else(|| unsafe { (*decoder.as_ptr()).ch_layout.nb_channels });
 
-        // Create stereo or mono layout based on channel count
         let mut out_layout: AVChannelLayout = unsafe { std::mem::zeroed() };
         if out_channels == 1 {
             unsafe { av_channel_layout_default(&mut out_layout, 1) };
@@ -142,7 +159,6 @@ impl AudioProcessor {
         }
         encoder.set_ch_layout(&out_layout)?;
 
-        // Set sample format (use first supported format from codec)
         let sample_fmts = unsafe { (*encoder_codec).sample_fmts };
         let out_sample_fmt = if !sample_fmts.is_null() {
             unsafe { *sample_fmts }
@@ -154,11 +170,10 @@ impl AudioProcessor {
         if let Some(bit_rate) = opts.output_format.bit_rate {
             encoder.set_bit_rate(bit_rate);
         } else {
-            encoder.set_bit_rate(192_000); // Default 192kbps
+            encoder.set_bit_rate(192_000);
         }
 
         if let Some(quality) = opts.output_format.quality {
-            // Convert quality to FFmpeg's scale (codec-specific)
             encoder.set_global_quality((quality * 100.0) as i32);
         }
 
@@ -174,7 +189,7 @@ impl AudioProcessor {
             "Encoder opened"
         );
 
-        // Set up filter graph if filters are specified
+        // Set up filter graph if needed
         let (filter_graph, buffersrc_ctx, buffersink_ctx) = if opts.filters.is_some()
             || decoder.sample_fmt() != out_sample_fmt
             || decoder.sample_rate() != out_sample_rate
@@ -196,8 +211,8 @@ impl AudioProcessor {
             |(g, src, sink)| (Some(g), src, sink),
         );
 
-        // Set up resampler if needed (for when we don't have a filter graph)
-        let mut resampler = if filter_graph.is_none()
+        // Set up resampler if no filter graph but format conversion needed
+        let resampler = if filter_graph.is_none()
             && (decoder.sample_fmt() != out_sample_fmt
                 || decoder.sample_rate() != out_sample_rate
                 || unsafe { av_channel_layout_compare(decoder.ch_layout(), &out_layout) } != 0)
@@ -216,31 +231,6 @@ impl AudioProcessor {
             None
         };
 
-        // Set up output
-        let mut output = OutputContext::open(&opts.output_format.format)?;
-
-        // Add audio stream
-        let out_stream = output.add_audio_stream(encoder_codec)?;
-        check(
-            unsafe { avcodec_parameters_from_context((*out_stream).codecpar, encoder.as_ptr()) },
-            "avcodec_parameters_from_context",
-        )?;
-        unsafe { (*out_stream).time_base = encoder.time_base() };
-
-        // Set metadata
-        for (key, value) in opts.metadata {
-            output.set_metadata(key, value)?;
-        }
-
-        output.write_header()?;
-
-        // Processing loop
-        let mut pkt = Packet::new()?;
-        let mut frame = Frame::new()?;
-        let mut filt_frame = Frame::new()?;
-        let mut enc_pkt = Packet::new()?;
-        let mut samples_processed: i64 = 0;
-
         // Calculate start/end samples for trimming
         let start_samples = opts
             .start_time
@@ -250,9 +240,55 @@ impl AudioProcessor {
             start + (d * decoder.sample_rate() as f64) as i64
         });
 
+        Ok(PipelineContext {
+            input,
+            audio_stream_idx,
+            decoder,
+            encoder,
+            encoder_codec,
+            filter_graph,
+            buffersrc_ctx,
+            buffersink_ctx,
+            resampler,
+            metadata: opts.metadata.clone(),
+            start_samples,
+            end_samples,
+        })
+    }
+
+    /// Run the encode/decode loop against any output sink.
+    /// Sets up the output stream, writes header, processes all frames, writes trailer.
+    fn run_to_output(
+        &self,
+        mut ctx: PipelineContext,
+        output: &mut dyn OutputWrite,
+    ) -> Result<(), FfmpegError> {
+        // Add audio stream to output
+        let out_stream = output.add_audio_stream(ctx.encoder_codec)?;
+        check(
+            unsafe {
+                avcodec_parameters_from_context((*out_stream).codecpar, ctx.encoder.as_ptr())
+            },
+            "avcodec_parameters_from_context",
+        )?;
+        unsafe { (*out_stream).time_base = ctx.encoder.time_base() };
+
+        // Set metadata
+        for (key, value) in &ctx.metadata {
+            output.set_metadata(key, value)?;
+        }
+
+        output.write_header()?;
+
+        // Allocate working packets and frames
+        let mut pkt = Packet::new()?;
+        let mut frame = Frame::new()?;
+        let mut filt_frame = Frame::new()?;
+        let mut enc_pkt = Packet::new()?;
+        let mut samples_processed: i64 = 0;
+
         loop {
-            // Read packet
-            let ret = unsafe { av_read_frame(input.format_ctx(), pkt.as_mut_ptr()) };
+            let ret = unsafe { av_read_frame(ctx.input.format_ctx(), pkt.as_mut_ptr()) };
             if ret < 0 {
                 if is_eof(ret) {
                     break;
@@ -260,71 +296,67 @@ impl AudioProcessor {
                 check(ret, "av_read_frame")?;
             }
 
-            if pkt.stream_index() as usize != audio_stream_idx {
+            if pkt.stream_index() as usize != ctx.audio_stream_idx {
                 pkt.unref();
                 continue;
             }
 
-            // Decode
             check(
-                unsafe { avcodec_send_packet(decoder.as_mut_ptr(), pkt.as_ptr()) },
+                unsafe { avcodec_send_packet(ctx.decoder.as_mut_ptr(), pkt.as_ptr()) },
                 "avcodec_send_packet",
             )?;
 
             loop {
                 let ret =
-                    unsafe { avcodec_receive_frame(decoder.as_mut_ptr(), frame.as_mut_ptr()) };
+                    unsafe { avcodec_receive_frame(ctx.decoder.as_mut_ptr(), frame.as_mut_ptr()) };
                 if !check_again(ret, "avcodec_receive_frame")? {
                     break;
                 }
 
-                // Check trimming
                 let frame_start = samples_processed;
                 let frame_end = frame_start + frame.nb_samples() as i64;
                 samples_processed = frame_end;
 
-                if let Some(start) = start_samples {
+                if let Some(start) = ctx.start_samples {
                     if frame_end <= start {
                         frame.unref();
                         continue;
                     }
                 }
-                if let Some(end) = end_samples {
+                if let Some(end) = ctx.end_samples {
                     if frame_start >= end {
                         frame.unref();
                         break;
                     }
                 }
 
-                // Apply filters or resample
-                let processed_frame = if filter_graph.is_some() {
-                    // Push frame through filter graph
+                let processed_frame = if ctx.filter_graph.is_some() {
                     check(
                         unsafe {
-                            av_buffersrc_add_frame_flags(buffersrc_ctx, frame.as_mut_ptr(), 0)
+                            av_buffersrc_add_frame_flags(ctx.buffersrc_ctx, frame.as_mut_ptr(), 0)
                         },
                         "av_buffersrc_add_frame",
                     )?;
 
                     loop {
                         let ret = unsafe {
-                            av_buffersink_get_frame(buffersink_ctx, filt_frame.as_mut_ptr())
+                            av_buffersink_get_frame(ctx.buffersink_ctx, filt_frame.as_mut_ptr())
                         };
                         if !check_again(ret, "av_buffersink_get_frame")? {
                             break;
                         }
 
                         self.encode_frame(
-                            &mut encoder,
+                            &mut ctx.encoder,
                             &mut filt_frame,
                             &mut enc_pkt,
-                            &mut output,
+                            output,
                             out_stream,
                         )?;
                         filt_frame.unref();
                     }
                     continue;
-                } else if let Some(ref mut r) = resampler {
+                } else if let Some(ref mut r) = ctx.resampler {
                     r.convert_frame(&mut filt_frame, &frame)?;
                     &mut filt_frame
                 } else {
@@ -332,10 +364,10 @@ impl AudioProcessor {
                 };
 
                 self.encode_frame(
-                    &mut encoder,
+                    &mut ctx.encoder,
                     processed_frame,
                     &mut enc_pkt,
-                    &mut output,
+                    output,
                     out_stream,
                 )?;
 
@@ -348,53 +380,57 @@ impl AudioProcessor {
 
         // Flush decoder
         check(
-            unsafe { avcodec_send_packet(decoder.as_mut_ptr(), ptr::null()) },
+            unsafe { avcodec_send_packet(ctx.decoder.as_mut_ptr(), ptr::null()) },
             "avcodec_send_packet (flush)",
         )?;
 
         loop {
-            let ret = unsafe { avcodec_receive_frame(decoder.as_mut_ptr(), frame.as_mut_ptr()) };
+            let ret =
+                unsafe { avcodec_receive_frame(ctx.decoder.as_mut_ptr(), frame.as_mut_ptr()) };
             if !check_again(ret, "avcodec_receive_frame (flush)")? {
                 break;
             }
 
-            if filter_graph.is_some() {
+            if ctx.filter_graph.is_some() {
                 check(
-                    unsafe { av_buffersrc_add_frame_flags(buffersrc_ctx, frame.as_mut_ptr(), 0) },
+                    unsafe {
+                        av_buffersrc_add_frame_flags(ctx.buffersrc_ctx, frame.as_mut_ptr(), 0)
+                    },
                     "av_buffersrc_add_frame (flush)",
                 )?;
 
                 loop {
-                    let ret =
-                        unsafe { av_buffersink_get_frame(buffersink_ctx, filt_frame.as_mut_ptr()) };
+                    let ret = unsafe {
+                        av_buffersink_get_frame(ctx.buffersink_ctx, filt_frame.as_mut_ptr())
+                    };
                     if !check_again(ret, "av_buffersink_get_frame (flush)")? {
                         break;
                     }
 
                     self.encode_frame(
-                        &mut encoder,
+                        &mut ctx.encoder,
                         &mut filt_frame,
                         &mut enc_pkt,
-                        &mut output,
+                        output,
                         out_stream,
                     )?;
                     filt_frame.unref();
                 }
-            } else if let Some(ref mut r) = resampler {
+            } else if let Some(ref mut r) = ctx.resampler {
                 r.convert_frame(&mut filt_frame, &frame)?;
                 self.encode_frame(
-                    &mut encoder,
+                    &mut ctx.encoder,
                     &mut filt_frame,
                     &mut enc_pkt,
-                    &mut output,
+                    output,
                     out_stream,
                 )?;
             } else {
                 self.encode_frame(
-                    &mut encoder,
+                    &mut ctx.encoder,
                     &mut frame,
                     &mut enc_pkt,
-                    &mut output,
+                    output,
                     out_stream,
                 )?;
             }
@@ -404,24 +440,24 @@ impl AudioProcessor {
         }
 
         // Flush filter graph
-        if filter_graph.is_some() {
+        if ctx.filter_graph.is_some() {
             check(
-                unsafe { av_buffersrc_add_frame_flags(buffersrc_ctx, ptr::null_mut(), 0) },
+                unsafe { av_buffersrc_add_frame_flags(ctx.buffersrc_ctx, ptr::null_mut(), 0) },
                 "av_buffersrc_add_frame (eof)",
             )?;
 
             loop {
                 let ret =
-                    unsafe { av_buffersink_get_frame(buffersink_ctx, filt_frame.as_mut_ptr()) };
+                    unsafe { av_buffersink_get_frame(ctx.buffersink_ctx, filt_frame.as_mut_ptr()) };
                 if !check_again(ret, "av_buffersink_get_frame (eof)")? {
                     break;
                 }
 
                 self.encode_frame(
-                    &mut encoder,
+                    &mut ctx.encoder,
                     &mut filt_frame,
                     &mut enc_pkt,
-                    &mut output,
+                    output,
                     out_stream,
                 )?;
                 filt_frame.unref();
@@ -429,14 +465,14 @@ impl AudioProcessor {
         }
 
         // Flush resampler
-        if let Some(ref mut r) = resampler {
+        if let Some(ref mut r) = ctx.resampler {
             r.flush(&mut filt_frame)?;
             if filt_frame.nb_samples() > 0 {
                 self.encode_frame(
-                    &mut encoder,
+                    &mut ctx.encoder,
                     &mut filt_frame,
                     &mut enc_pkt,
-                    &mut output,
+                    output,
                     out_stream,
                 )?;
             }
@@ -444,12 +480,13 @@ impl AudioProcessor {
 
         // Flush encoder
         check(
-            unsafe { avcodec_send_frame(encoder.as_mut_ptr(), ptr::null()) },
+            unsafe { avcodec_send_frame(ctx.encoder.as_mut_ptr(), ptr::null()) },
             "avcodec_send_frame (flush)",
         )?;
 
         loop {
-            let ret = unsafe { avcodec_receive_packet(encoder.as_mut_ptr(), enc_pkt.as_mut_ptr()) };
+            let ret =
+                unsafe { avcodec_receive_packet(ctx.encoder.as_mut_ptr(), enc_pkt.as_mut_ptr()) };
             if !check_again(ret, "avcodec_receive_packet (flush)")? {
                 break;
             }
@@ -457,7 +494,7 @@ impl AudioProcessor {
             unsafe {
                 av_packet_rescale_ts(
                     enc_pkt.as_mut_ptr(),
-                    encoder.time_base(),
+                    ctx.encoder.time_base(),
                     (*out_stream).time_base,
                 );
                 (*enc_pkt.as_mut_ptr()).stream_index = 0;
@@ -469,10 +506,34 @@ impl AudioProcessor {
 
         output.write_trailer()?;
 
+        Ok(())
+    }
+
+    /// Process audio data. Returns the full encoded output as `Vec<u8>`.
+    #[instrument(skip(self, opts), fields(input_size = opts.input.len()))]
+    pub fn process(&self, opts: ProcessOptions<'_>) -> Result<Vec<u8>, FfmpegError> {
+        let output_format_name = opts.output_format.format.clone();
+        let ctx = self.setup_pipeline(opts)?;
+        let mut output = OutputContext::open(&output_format_name)?;
+        self.run_to_output(ctx, &mut output)?;
         let result = output.take_output();
         debug!(output_size = result.len(), "Processing complete");
-
         Ok(result)
+    }
+
+    /// Process audio data, streaming encoded chunks to `sender` as they are produced.
+    /// Only use with output formats that write sequentially: `mp3`, `ogg` (Vorbis/Opus).
+    #[instrument(skip(self, opts, sender), fields(input_size = opts.input.len()))]
+    pub fn process_streaming(
+        &self,
+        opts: ProcessOptions<'_>,
+        sender: mpsc::SyncSender<bytes::Bytes>,
+    ) -> Result<(), FfmpegError> {
+        let output_format_name = opts.output_format.format.clone();
+        let ctx = self.setup_pipeline(opts)?;
+        let mut output = StreamingOutputContext::open(&output_format_name, sender)?;
+        self.run_to_output(ctx, &mut output)?;
+        output.flush()
     }
 
     fn setup_filters(
@@ -486,11 +547,9 @@ impl AudioProcessor {
     ) -> Result<(FilterGraph, *mut AVFilterContext, *mut AVFilterContext), FfmpegError> {
         let mut graph = FilterGraph::new()?;
 
-        // Get buffer source and sink filters
         let buffersrc = get_filter("abuffer")?;
         let buffersink = get_filter("abuffersink")?;
 
-        // Build abuffer args
         let mut in_ch_layout_str = [0i8; 64];
         unsafe {
             av_channel_layout_describe(
@@ -529,7 +588,6 @@ impl AudioProcessor {
             }
         }
 
-        // Build filter chain with explicit format conversion at the end
         let out_sample_fmt_name = unsafe {
             let name = av_get_sample_fmt_name(out_sample_fmt);
             std::ffi::CStr::from_ptr(name)
@@ -565,7 +623,6 @@ impl AudioProcessor {
             format!("aformat={}", aformat_args)
         };
 
-        // Create in/out endpoints
         let mut outputs = unsafe { avfilter_inout_alloc() };
         let mut inputs = unsafe { avfilter_inout_alloc() };
 
@@ -604,7 +661,7 @@ impl AudioProcessor {
         encoder: &mut CodecContext,
         frame: &mut Frame,
         pkt: &mut Packet,
-        output: &mut OutputContext,
+        output: &mut dyn OutputWrite,
         out_stream: *mut AVStream,
     ) -> Result<(), FfmpegError> {
         check(
