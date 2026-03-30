@@ -6,3 +6,4 @@ pub mod params;
 pub mod root;
 pub mod stream;
 pub mod streamingpath;
+pub mod thumbnail;

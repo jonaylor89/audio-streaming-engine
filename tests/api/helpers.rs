@@ -1,4 +1,5 @@
 use once_cell::sync::Lazy;
+use std::path::PathBuf;
 use streaming_engine::{
     config::get_configuration,
     startup::Application,
@@ -18,6 +19,10 @@ static TRACING: Lazy<()> = Lazy::new(|| {
         init_subscriber(subscriber);
     }
 });
+
+// ---------------------------------------------------------------------------
+// Test app
+// ---------------------------------------------------------------------------
 
 pub struct TestApp {
     pub address: String,
@@ -67,4 +72,49 @@ pub async fn spawn_app() -> TestApp {
         api_client: client,
         server_handle,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Audio fixtures
+// ---------------------------------------------------------------------------
+
+/// Path to the MP3 test fixture (uploads/sample1.mp3).
+pub fn fixture_path() -> PathBuf {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("uploads/sample1.mp3");
+    assert!(
+        path.exists(),
+        "Test fixture not found at {:?}. Ensure uploads/sample1.mp3 exists.",
+        path,
+    );
+    path
+}
+
+/// Load the MP3 test fixture as raw bytes.
+pub fn load_fixture_bytes() -> bytes::Bytes {
+    bytes::Bytes::from(std::fs::read(fixture_path()).unwrap())
+}
+
+/// Decode the MP3 test fixture to mono f32 PCM.
+pub fn load_fixture_pcm() -> ffmpeg::PcmData {
+    ffmpeg::decode_to_pcm(load_fixture_bytes()).expect("fixture should decode to PCM")
+}
+
+/// Generate a minimal valid WAV file (1 sample, 8 kHz, 16-bit mono).
+pub fn minimal_wav_file() -> Vec<u8> {
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&38u32.to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&8000u32.to_le_bytes()); // sample rate
+    wav.extend_from_slice(&16000u32.to_le_bytes()); // byte rate
+    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&2u32.to_le_bytes());
+    wav.extend_from_slice(&0i16.to_le_bytes());
+    wav
 }

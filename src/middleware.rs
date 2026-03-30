@@ -14,6 +14,7 @@ use tracing::{debug, warn};
 
 const CACHE_KEY_PREFIX: &str = "req_cache:";
 const META_CACHE_KEY_PREFIX: &str = "meta_cache:";
+const THUMB_CACHE_KEY_PREFIX: &str = "thumb_cache:";
 
 #[tracing::instrument(skip(state, req, next))]
 pub async fn cache_middleware(
@@ -28,6 +29,8 @@ pub async fn cache_middleware(
     let uri_path = req.uri().path();
     let cache_key_prefix = if uri_path.starts_with("/meta") {
         META_CACHE_KEY_PREFIX
+    } else if uri_path.starts_with("/thumbnail") {
+        THUMB_CACHE_KEY_PREFIX
     } else {
         CACHE_KEY_PREFIX
     };
@@ -89,6 +92,7 @@ pub async fn auth_middleware(
         .path()
         .trim_start_matches("/meta")
         .trim_start_matches("/stream")
+        .trim_start_matches("/thumbnail")
         .strip_prefix("/")
         .and_then(|s| s.split("/").next())
         .ok_or_else(|| e400(eyre!("Failed to parse URI hash")))?;

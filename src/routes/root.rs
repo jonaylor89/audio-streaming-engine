@@ -24,8 +24,11 @@ pub async fn root_handler(State(state): State<AppStateDyn>) -> Result<impl IntoR
 <a href="/unsafe/{key}">stream</a>
 | <a href="/meta/unsafe/{key}">meta</a>
 | <a href="/params/unsafe/{key}">params</a>
+| <a href="/thumbnail/unsafe/{key}">thumbnail</a>
 </td>
-<td class="player"><audio controls preload="none"><source src="/unsafe/{key}"></audio></td>
+<td class="player">
+<audio controls preload="none" title="thumbnail" data-thumb="{key}"><source src="/thumbnail/unsafe/{key}"></audio>
+</td>
 </tr>
 "#
         ));
@@ -103,7 +106,8 @@ td.key a:hover {{ text-decoration: underline; }}
 td.actions {{ font-size: 11px; white-space: nowrap; }}
 td.actions a {{ color: #555; text-decoration: none; }}
 td.actions a:hover {{ color: #0366d6; text-decoration: underline; }}
-td.player audio {{ height: 28px; vertical-align: middle; }}
+td.player audio {{ height: 28px; vertical-align: middle; display: block; margin: 2px 0; }}
+td.player audio[data-thumb] {{ opacity: 0.7; }}
 .empty {{ padding: 24px; text-align: center; color: #999; }}
 #footer {{ max-width: 960px; margin: 8px auto; font-size: 10px; color: #999; text-align: center; }}
 </style>
@@ -123,7 +127,7 @@ td.player audio {{ height: 28px; vertical-align: middle; }}
 <div id="content">
 <div class="info">{count} file(s) in storage</div>
 <table class="files">
-<tr><th>key</th><th>links</th><th>player</th></tr>
+<tr><th>key</th><th>links</th><th>thumbnail</th></tr>
 {rows}
 </table>
 </div>

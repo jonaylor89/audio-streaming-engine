@@ -1,27 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::helpers::spawn_app;
+use crate::helpers::{minimal_wav_file, spawn_app};
 
 const TEST_FILE_PREFIX: &str = "range-request-";
-
-fn minimal_wav_file() -> Vec<u8> {
-    let mut wav = Vec::new();
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&38u32.to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&8000u32.to_le_bytes());
-    wav.extend_from_slice(&16000u32.to_le_bytes());
-    wav.extend_from_slice(&2u16.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&2u32.to_le_bytes());
-    wav.extend_from_slice(&0i16.to_le_bytes());
-    wav
-}
 
 async fn cleanup_test_artifacts() {
     let mut entries = match tokio::fs::read_dir("uploads").await {

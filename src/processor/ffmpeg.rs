@@ -108,7 +108,18 @@ fn collect_filters(params: &Params) -> Option<String> {
         filters.push(format!("afade=t=in:d={:.3}", fade));
     }
     if let Some(fade) = params.fade_out {
-        filters.push(format!("afade=t=out:d={:.3}", fade));
+        // afade=t=out defaults st=0, which fades from the START — producing silence.
+        // We need st=(output_duration - fade) so the fade ends at the clip boundary.
+        if let Some(dur) = params.duration {
+            let st = (dur - fade).max(0.0);
+            filters.push(format!("afade=t=out:st={:.3}:d={:.3}", st, fade));
+        } else {
+            // No known duration: use FFmpeg's EOF-relative reverse-fade trick.
+            // areverse → afade=t=in → areverse gives a fade-out at the true end.
+            filters.push("areverse".to_string());
+            filters.push(format!("afade=t=in:d={:.3}", fade));
+            filters.push("areverse".to_string());
+        }
     }
     if let Some(fade) = params.cross_fade {
         filters.push(format!("acrossfade=d={:.3}", fade));
@@ -309,5 +320,34 @@ mod tests {
         };
 
         assert!(!is_passthrough_request(&input, &params));
+    }
+
+    #[test]
+    fn test_fade_out_with_duration_sets_start_time() {
+        let params = Params {
+            fade_out: Some(1.0),
+            duration: Some(30.0),
+            ..Default::default()
+        };
+        let filters = collect_filters(&params).unwrap();
+        assert!(
+            filters.contains("afade=t=out:st=29.000:d=1.000"),
+            "expected st=29s for 30s clip with 1s fade, got: {}",
+            filters,
+        );
+    }
+
+    #[test]
+    fn test_fade_out_without_duration_uses_reverse_trick() {
+        let params = Params {
+            fade_out: Some(2.0),
+            ..Default::default()
+        };
+        let filters = collect_filters(&params).unwrap();
+        assert!(
+            filters.contains("areverse") && filters.contains("afade=t=in:d=2.000"),
+            "expected areverse+fade_in+areverse trick, got: {}",
+            filters,
+        );
     }
 }

@@ -7,10 +7,12 @@ mod error;
 mod handle;
 mod io;
 pub mod metadata;
+mod pcm;
 mod pipeline;
 
 pub use error::FfmpegError;
 pub use metadata::{extract_metadata, AudioFileMetadata};
+pub use pcm::{decode_to_pcm, PcmData};
 pub use pipeline::{AudioProcessor, OutputFormat, ProcessOptions};
 
 use std::sync::Once;

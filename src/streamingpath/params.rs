@@ -36,7 +36,8 @@ where
         let path = uri
             .path()
             .trim_start_matches("/params")
-            .trim_start_matches("/meta");
+            .trim_start_matches("/meta")
+            .trim_start_matches("/thumbnail");
 
         // Parse query string into a HashMap
         let query_params_string = uri.query().unwrap_or("");
@@ -60,7 +61,7 @@ impl TryFrom<&str> for Params {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq, ToSchema)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, ToSchema)]
 pub struct Params {
     // the uri for the audio
     pub key: String,

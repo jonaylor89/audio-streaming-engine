@@ -11,6 +11,7 @@ use crate::routes::params::params;
 use crate::routes::root::root_handler;
 use crate::routes::stream::stream_handler;
 use crate::routes::streamingpath::streamingpath_handler;
+use crate::routes::thumbnail::thumbnail_handler;
 use crate::state::{AppStateDyn, WebConfig};
 use crate::storage::AudioStorage;
 #[cfg(any(feature = "s3", feature = "gcs"))]
@@ -267,6 +268,7 @@ where
         .merge(
             Router::new()
                 .route("/meta/{*streamingpath}", get(meta_handler))
+                .route("/thumbnail/{*streamingpath}", get(thumbnail_handler))
                 .route("/{*streamingpath}", get(streamingpath_handler))
                 .route_layer(middleware::from_fn_with_state(
                     state.clone(),
