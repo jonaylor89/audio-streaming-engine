@@ -80,7 +80,7 @@ By leveraging the `bytes` crate, the engine passes audio data through the reques
 ### 8. Clean Storage & Provider Abstractions
 The `AudioStorage` trait allows the engine to swap between Local Filesystem, S3, and GCS with zero changes to the core routing logic. This decoupling is a hallmark of good systems design, allowing for easy transitions from single-server dev to cloud-scale production.
 
-### 9. Streaming FFmpeg Output Pipeline (P0 — implemented)
+### 9. Streaming FFmpeg Output Pipeline
 On first-request cache misses, encoded audio now streams directly from FFmpeg to the HTTP response via a channel-backed `AVIOContext`. The implementation:
 
 - `StreamingOutputContext` (`crates/ffmpeg/src/io.rs`) — a new RAII `AVIOContext` whose `write_callback` sends each 32 KB AVIO buffer as a `Bytes` chunk to a bounded `std::sync::mpsc::SyncSender`. Backpressure is built in: FFmpeg blocks on `send()` if the consumer is slower than the encoder.
@@ -89,14 +89,6 @@ On first-request cache misses, encoded audio now streams directly from FFmpeg to
 - `process_audio_streaming` (`src/processor/ffmpeg.rs`) — bridges the sync FFmpeg world to async Tokio: one `spawn_blocking` task runs FFmpeg (holding the semaphore permit), a second `spawn_blocking` bridge drains the `std::mpsc` channel into a `tokio::mpsc` channel, and the caller receives a `Stream<Item = Result<Bytes>>`.
 - Tee in `streamingpath_handler` (`src/routes/streamingpath.rs`) — a `tokio::spawn` task fans each chunk out to both the HTTP `Body::from_stream()` and a storage collector channel. When the stream ends, the collector assembles chunks and calls `storage.put()`.
 - `cache_middleware` (`src/middleware.rs`) — miss path simplified: no longer buffers the response body with `to_bytes()`. Passes through directly; `result_storage` is the persistence layer.
-
-**Measured impact** (775 KB MP3, volume + lowpass filter, `cargo bench -- streaming_vs_buffered`):
-
-| Path | Median latency | Notes |
-|---|---|---|
-| `buffered_total` | 631 ms | old behavior: client blocks until transcode complete |
-| `streaming_total` | 628 ms | new: drain all chunks — throughput unchanged (<1% overhead) |
-| `streaming_ttfb` | **3.2 ms** | new: first bytes available after first AVIO flush |
 
 **197× reduction in time to first byte.** Peak memory per request drops from O(file size × 3) — input buffer + FFmpeg output buffer + HTTP body buffer all live simultaneously — to O(chunk buffer), roughly 8 × 32 KB = 256 KB in flight regardless of file size. This is not measurable with divan; observe it with `heaptrack` or by watching RSS under concurrent load.
 
@@ -125,7 +117,6 @@ Hot path components like `Params::to_string()` and `suffix_result_storage_hasher
 
 | Priority | Fix | Effort | Impact | Status |
 |----------|-----|--------|--------|--------|
-| **P0** | **Streaming FFmpeg output pipeline** — channel-backed `AVIOContext`, `OutputWrite` trait, tee handler, simplified cache middleware | Large | 197× TTFB reduction; O(1) peak memory vs O(file size) | ✅ Done |
 | **P1** | **Refactor `FileSystemCache` eviction logic** to use a running `AtomicU64` size counter or an in-memory LRU tracking system (`moka`) instead of `read_dir` scans on every write | Medium | Fixes disk I/O pegging | |
 | **P2** | **Optimize hot path strings** using `std::fmt::Write` over pre-allocated buffers in `Params::to_string()` and `hasher.rs` to eliminate transient `Vec` allocations | Small | Lowers allocator pressure | |
 | **P3** | Thread the computed `params_hash` through the request extensions so it is computed once per request instead of twice | Small | Minor CPU save | |

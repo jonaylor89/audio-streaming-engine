@@ -26,9 +26,9 @@ use axum::routing::get;
 use axum::{Router, serve::Serve};
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, eyre};
-use secrecy::SecretString;
 #[cfg(feature = "s3")]
 use secrecy::ExposeSecret;
+use secrecy::SecretString;
 use std::future::ready;
 use std::path::PathBuf;
 use std::sync::Arc;
