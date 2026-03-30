@@ -4,20 +4,16 @@ use crate::streamingpath::params::Params;
 use crate::utils::{AppError, e400, e416, e500};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode, header};
 use axum::{
-    body::{Body, Bytes, to_bytes},
+    body::{Body, Bytes},
     extract::{Request, State},
     middleware::Next,
     response::IntoResponse,
 };
 use color_eyre::eyre::eyre;
-use std::time::Duration;
 use tracing::debug;
 
 const CACHE_KEY_PREFIX: &str = "req_cache:";
 const META_CACHE_KEY_PREFIX: &str = "meta_cache:";
-const CACHE_TTL: Duration = Duration::from_secs(3600); // 1 hour
-/// Maximum response body size we will buffer for caching (256 MB).
-const MAX_CACHEABLE_BODY_SIZE: usize = 256 * 1024 * 1024;
 
 #[tracing::instrument(skip(state, req, next))]
 pub async fn cache_middleware(
@@ -52,38 +48,13 @@ pub async fn cache_middleware(
         return build_audio_response(&request_headers, &content_type, Bytes::from(buf));
     }
 
-    // Cache the full response body, then apply range handling locally so first
-    // requests and cache hits behave the same way.
+    // Cache MISS: pass through to handler.
+    // Range header removal and body buffering are no longer needed: the handler
+    // uses chunked streaming, and result_storage (in the handler) handles caching.
+    // The next request for the same params will hit storage.get() in the handler.
     req.headers_mut().remove(header::RANGE);
     let response = next.run(req).await;
-    if response.status() != StatusCode::OK {
-        return Ok(response);
-    }
-
-    // Buffer response body so we can cache it and handle range requests
-    let (parts, body) = response.into_parts();
-    let bytes = to_bytes(body, MAX_CACHEABLE_BODY_SIZE)
-        .await
-        .map_err(|e| e500(eyre!("Failed to read response body: {}", e)))?;
-
-    let content_type = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
-        .or_else(|| infer::get(bytes.as_ref()).map(|mime| mime.to_string()))
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-
-    // Write to cache in background — don't block the response
-    let bg_cache = state.cache.clone();
-    let bg_bytes = bytes.clone();
-    tokio::spawn(async move {
-        let _ = bg_cache
-            .set(&cache_key, bg_bytes.as_ref(), Some(CACHE_TTL))
-            .await;
-    });
-
-    build_audio_response(&request_headers, &content_type, bytes)
+    Ok(response)
 }
 
 pub async fn auth_middleware(

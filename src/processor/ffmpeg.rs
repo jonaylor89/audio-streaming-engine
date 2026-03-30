@@ -3,6 +3,7 @@ use std::pin::Pin;
 use bytes::Bytes;
 use color_eyre::Result;
 use futures::Stream;
+use std::sync::mpsc;
 use tracing::instrument;
 
 use crate::{
@@ -171,9 +172,7 @@ pub async fn process_audio_streaming(
     input: &AudioBuffer,
     params: &Params,
     permit: tokio::sync::OwnedSemaphorePermit,
-) -> color_eyre::Result<Pin<Box<dyn Stream<Item = color_eyre::Result<Bytes>> + Send>>> {
-    use std::sync::mpsc;
-
+) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
     if is_passthrough_request(input, params) {
         let bytes = input.clone().into_bytes();
         return Ok(Box::pin(futures::stream::once(async move { Ok(bytes) })));
@@ -193,7 +192,7 @@ pub async fn process_audio_streaming(
 
     // Bridge: drain the std::sync channel from a spawn_blocking task and forward
     // to a tokio channel that the async stream can consume.
-    let (tokio_tx, tokio_rx) = tokio::sync::mpsc::channel::<color_eyre::Result<Bytes>>(8);
+    let (tokio_tx, tokio_rx) = tokio::sync::mpsc::channel::<Result<Bytes>>(8);
     let bridge_tx = tokio_tx;
     tokio::task::spawn_blocking(move || {
         while let Ok(chunk) = std_rx.recv() {

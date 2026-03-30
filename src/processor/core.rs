@@ -10,7 +10,8 @@ use tokio::sync::Semaphore;
 use tracing::{info, instrument};
 
 use crate::{
-    blob::AudioBuffer, config::ProcessorSettings,
+    blob::AudioBuffer,
+    config::ProcessorSettings,
     processor::ffmpeg::{process_audio, process_audio_streaming},
     streamingpath::params::Params,
 };

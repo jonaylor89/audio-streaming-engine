@@ -41,7 +41,7 @@ impl AudioFormat {
         }
     }
 
-    fn mime_type(&self) -> &'static str {
+    pub fn mime_type(&self) -> &'static str {
         match self {
             Self::Mp3 => "audio/mpeg",
             Self::Wav => "audio/wav",

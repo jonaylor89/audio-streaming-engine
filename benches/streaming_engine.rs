@@ -365,7 +365,8 @@ mod cache_performance_patterns {
             let file_id = if rand::random::<f32>() < 0.8 {
                 rand::random::<usize>() % (num_unique_files / 2) // Popular files (cached)
             } else {
-                (num_unique_files / 2) + (rand::random::<usize>() % (num_unique_files / 2)) // Less popular files
+                (num_unique_files / 2) + (rand::random::<usize>() % (num_unique_files / 2))
+                // Less popular files
             };
 
             let key = format!("cached_file_{}", file_id);
@@ -564,6 +565,113 @@ mod hash_performance_real_world {
         }
 
         black_box(results)
+    }
+}
+
+/// Compare the buffered (`process`) and streaming (`process_streaming`) code paths
+/// using the real sample fixtures. Three questions:
+///
+/// 1. `buffered_total` vs `streaming_total` — does streaming add throughput overhead?
+///    Expected: within a few percent (channel overhead is tiny vs FFmpeg work).
+///
+/// 2. `streaming_ttfb` vs `buffered_total` — how much earlier does the client receive
+///    the first bytes? Expected: streaming TTFB << buffered total (first chunk arrives
+///    after the first AVIO flush, not after the full transcode).
+///
+/// 3. Peak memory: NOT measurable here — use `heaptrack` or watch RSS under concurrent
+///    load. Buffered peak ≈ input + output + HTTP body in memory simultaneously;
+///    streaming peak ≈ a few channel-buffered 32 KB chunks regardless of file size.
+mod streaming_vs_buffered {
+    use super::*;
+    use futures::StreamExt;
+
+    fn build_processor() -> Arc<Processor> {
+        Arc::new(Processor::new(ProcessorSettings {
+            disabled_filters: Vec::new(),
+            max_filter_ops: 100,
+            concurrency: Some(2),
+            max_cache_files: 100,
+            max_cache_mem: 50 * 1024 * 1024,
+            max_cache_size: 200 * 1024 * 1024,
+        }))
+    }
+
+    // Apply volume + lowpass so FFmpeg does real work (not a passthrough), output stays MP3.
+    fn transcode_params() -> Params {
+        Params {
+            key: "sample1.mp3".to_string(),
+            format: Some(AudioFormat::Mp3),
+            volume: Some(0.9),
+            lowpass: Some(12000.0),
+            ..Default::default()
+        }
+    }
+
+    /// Buffered path: `process()` blocks until the entire transcode is complete.
+    /// This is the baseline and sets the upper bound for streaming TTFB.
+    #[divan::bench(ignore = cfg!(codspeed))]
+    fn buffered_total(bencher: Bencher<'_, '_>) {
+        let processor = build_processor();
+        let params = transcode_params();
+        bencher.bench(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                black_box(
+                    processor
+                        .process(black_box(&*SAMPLE_MP3_FIXTURE), black_box(&params))
+                        .await
+                        .unwrap(),
+                )
+            })
+        });
+    }
+
+    /// Streaming path, full drain: consume every chunk until the stream closes.
+    /// Should match `buffered_total` within a few percent — confirms no throughput regression.
+    #[divan::bench(ignore = cfg!(codspeed))]
+    fn streaming_total(bencher: Bencher<'_, '_>) {
+        let processor = build_processor();
+        let params = transcode_params();
+        bencher.bench(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let stream = processor
+                    .process_streaming(black_box(&*SAMPLE_MP3_FIXTURE), black_box(&params))
+                    .await
+                    .unwrap();
+                futures::pin_mut!(stream);
+                let mut total = 0usize;
+                while let Some(chunk) = stream.next().await {
+                    total += chunk.unwrap().len();
+                }
+                black_box(total)
+            })
+        });
+    }
+
+    /// Streaming TTFB: time until the **first** encoded chunk is available.
+    /// This is what the HTTP client sees as latency before bytes start flowing.
+    /// Should be significantly lower than `buffered_total` — typically the time
+    /// to fill the first AVIO output buffer (~32 KB of encoded audio).
+    #[divan::bench(ignore = cfg!(codspeed))]
+    fn streaming_ttfb(bencher: Bencher<'_, '_>) {
+        let processor = build_processor();
+        let params = transcode_params();
+        bencher.bench(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let stream = processor
+                    .process_streaming(black_box(&*SAMPLE_MP3_FIXTURE), black_box(&params))
+                    .await
+                    .unwrap();
+                futures::pin_mut!(stream);
+                // Only wait for the first chunk — rest is discarded (simulates slow client).
+                // Cleanup: dropping the stream signals the channel closed; the bridge task
+                // stops forwarding and the FFmpeg task gets AVERROR_IO on next write.
+                let first = stream.next().await;
+                black_box(first.unwrap().unwrap().len())
+            })
+        });
     }
 }
 
