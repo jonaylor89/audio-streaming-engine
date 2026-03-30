@@ -9,6 +9,7 @@ use crate::routes::list::list_handler;
 use crate::routes::meta::meta_handler;
 use crate::routes::params::params;
 use crate::routes::root::root_handler;
+use crate::routes::stream::stream_handler;
 use crate::routes::streamingpath::streamingpath_handler;
 use crate::state::{AppStateDyn, WebConfig};
 use crate::storage::AudioStorage;
@@ -266,6 +267,14 @@ where
                 .route_layer(middleware::from_fn_with_state(
                     state.clone(),
                     cache_middleware,
+                )),
+        )
+        .merge(
+            Router::new()
+                .route("/stream/{*streamingpath}", get(stream_handler))
+                .route_layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    auth_middleware,
                 )),
         )
         // Allow all origins for CORS - this is an open streaming server with custom auth/rate limiting

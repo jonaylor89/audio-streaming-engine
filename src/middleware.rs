@@ -10,7 +10,7 @@ use axum::{
     response::IntoResponse,
 };
 use color_eyre::eyre::eyre;
-use tracing::debug;
+use tracing::{debug, warn};
 
 const CACHE_KEY_PREFIX: &str = "req_cache:";
 const META_CACHE_KEY_PREFIX: &str = "meta_cache:";
@@ -48,13 +48,32 @@ pub async fn cache_middleware(
         return build_audio_response(&request_headers, &content_type, Bytes::from(buf));
     }
 
-    // Cache MISS: pass through to handler.
-    // Range header removal and body buffering are no longer needed: the handler
-    // uses chunked streaming, and result_storage (in the handler) handles caching.
-    // The next request for the same params will hit storage.get() in the handler.
+    // Cache MISS: strip Range (we need the full body to cache it), run the handler,
+    // buffer the response, write to cache in background, then serve with range support.
     req.headers_mut().remove(header::RANGE);
     let response = next.run(req).await;
-    Ok(response)
+
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("audio/mpeg")
+        .to_string();
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .map_err(|e| e500(eyre!("Failed to buffer response body: {}", e)))?;
+
+    let bg_cache = state.cache.clone();
+    let bg_key = cache_key;
+    let bg_bytes = body_bytes.clone();
+    tokio::spawn(async move {
+        if let Err(e) = bg_cache.set(&bg_key, &bg_bytes, None).await {
+            warn!("Failed to write response to cache [{}]: {}", &bg_key, e);
+        }
+    });
+
+    build_audio_response(&request_headers, &content_type, body_bytes)
 }
 
 pub async fn auth_middleware(
@@ -69,6 +88,7 @@ pub async fn auth_middleware(
         .uri()
         .path()
         .trim_start_matches("/meta")
+        .trim_start_matches("/stream")
         .strip_prefix("/")
         .and_then(|s| s.split("/").next())
         .ok_or_else(|| e400(eyre!("Failed to parse URI hash")))?;
