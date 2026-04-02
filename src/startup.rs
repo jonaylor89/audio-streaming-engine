@@ -82,6 +82,14 @@ impl Application {
         };
 
         let processor = Processor::new(config.processor);
+
+        if config.application.clear_on_startup {
+            clear_directory(&config.cache).await;
+            if let Some(ref rs) = config.result_storage {
+                clear_directory_path(&rs.base_dir).await;
+            }
+        }
+
         let cache = Cache::new(config.cache).await?;
 
         info!("initializing source storage");
@@ -302,4 +310,30 @@ where
     let server = axum::serve(listener, app);
 
     Ok(server)
+}
+
+/// Clear the contents of a cache directory based on cache config.
+async fn clear_directory(cache: &crate::config::CacheSettings) {
+    match cache {
+        crate::config::CacheSettings::Filesystem(fs) => {
+            clear_directory_path(&fs.base_dir).await;
+        }
+        crate::config::CacheSettings::Redis { .. } => {
+            info!("clear_on_startup: skipping Redis cache (use FLUSHDB manually)");
+        }
+    }
+}
+
+/// Remove all files in a directory, recreating it if needed.
+async fn clear_directory_path(path: &str) {
+    let p = std::path::Path::new(path);
+    if p.exists() {
+        match tokio::fs::remove_dir_all(p).await {
+            Ok(()) => info!("clear_on_startup: cleared {}", path),
+            Err(e) => tracing::warn!("clear_on_startup: failed to clear {}: {}", path, e),
+        }
+    }
+    if let Err(e) = tokio::fs::create_dir_all(p).await {
+        tracing::warn!("clear_on_startup: failed to recreate {}: {}", path, e);
+    }
 }

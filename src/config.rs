@@ -32,6 +32,7 @@ pub struct ApplicationSettings {
     pub host: String,
     pub hmac_secret: SecretString,
     pub web_ui: bool,
+    pub clear_on_startup: bool,
 }
 
 impl Default for ApplicationSettings {
@@ -40,6 +41,7 @@ impl Default for ApplicationSettings {
             host: String::from("127.0.0.1"),
             hmac_secret: SecretString::from("this-is-a-secret".to_string()),
             web_ui: false,
+            clear_on_startup: false,
         }
     }
 }

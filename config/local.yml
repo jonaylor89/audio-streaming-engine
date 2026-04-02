@@ -1,6 +1,7 @@
 application:
   host: 127.0.0.1
   web_ui: true
+  clear_on_startup: true
 
 storage:
   base_dir: "uploads"
