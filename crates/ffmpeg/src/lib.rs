@@ -22,6 +22,12 @@ static INIT: Once = Once::new();
 /// Initialize FFmpeg. Called automatically when creating an AudioProcessor.
 pub fn init() {
     INIT.call_once(|| {
+        unsafe {
+            // Suppress noisy FFmpeg warnings (e.g. mp3float timestamp warnings).
+            // Only errors and above will be printed.
+            ffmpeg_sys::av_log_set_level(ffmpeg_sys::AV_LOG_ERROR as libc::c_int);
+        }
+
         // In modern FFmpeg (4.0+), av_register_all() is deprecated and no-op.
         // Network initialization is still needed for some protocols.
         #[cfg(feature = "network")]

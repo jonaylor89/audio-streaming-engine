@@ -92,31 +92,15 @@ sha2 = "0.10.9"
 once_cell = "1.21.4"
 
 [[bench]]
-name = "audio_processing"
+name = "processing"
 harness = false
 
 [[bench]]
-name = "params_parsing"
+name = "hashing"
 harness = false
 
 [[bench]]
-name = "hash_operations"
-harness = false
-
-[[bench]]
-name = "storage_operations"
-harness = false
-
-[[bench]]
-name = "streaming_engine"
-harness = false
-
-[[bench]]
-name = "perf_improvements"
-harness = false
-
-[[bench]]
-name = "thumbnail"
+name = "io"
 harness = false
 
 [dev-dependencies]
