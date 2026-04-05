@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::blob::AudioBuffer;
+use crate::storage::backend::ByteStream as StorageByteStream;
 use crate::storage::AudioStorage;
 use crate::streamingpath::normalize::{SafeCharsType, normalize};
 use async_trait::async_trait;
@@ -67,6 +68,26 @@ impl AudioStorage for S3Storage {
             .await?;
 
         Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn get_stream(&self, key: &str) -> Result<StorageByteStream> {
+        let full_path = self.get_full_path(key);
+
+        let output = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(full_path)
+            .send()
+            .await?;
+
+        let stream = output.body.into_async_read();
+        let reader_stream = tokio_util::io::ReaderStream::new(stream);
+        Ok(Box::pin(futures::stream::StreamExt::map(
+            reader_stream,
+            |r| r.map_err(|e| e.into()),
+        )))
     }
 
     #[tracing::instrument(skip(self))]

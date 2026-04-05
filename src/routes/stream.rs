@@ -11,7 +11,8 @@ use futures::StreamExt;
 use tracing::{info, instrument, warn};
 
 use crate::{
-    blob::AudioBuffer,
+    blob::{AudioBuffer, AudioFormat},
+    processor::ffmpeg::is_passthrough_for_format,
     remote::fetch_audio_buffer,
     state::AppStateDyn,
     streamingpath::{hasher::suffix_result_storage_hasher, params::Params},
@@ -49,8 +50,86 @@ pub async fn stream_handler(
             .map_err(|e| e500(eyre!("Failed to build response: {}", e)));
     }
 
-    // Result storage MISS: fetch source audio
-    let blob = if params.key.starts_with("https://") || params.key.starts_with("http://") {
+    // Result storage MISS: detect format from key extension for passthrough check
+    let is_remote = params.key.starts_with("https://") || params.key.starts_with("http://");
+    let source_format = params
+        .key
+        .rsplit('.')
+        .next()
+        .map(AudioFormat::from_extension)
+        .unwrap_or(AudioFormat::Unknown);
+
+    // Streaming passthrough: stream directly from storage to HTTP response
+    // when no processing is needed and we can determine the format from the key.
+    if !is_remote
+        && source_format != AudioFormat::Unknown
+        && is_passthrough_for_format(source_format, &params)
+    {
+        info!(key = %params.key, "streaming passthrough — zero-buffer path");
+        let mime = source_format.mime_type();
+
+        let storage_stream = state.storage.get_stream(&params.key).await.map_err(|e| {
+            tracing::error!("Failed to stream audio from storage {}: {}", params.key, e);
+            e404(eyre!("Failed to fetch audio: {}", e))
+        })?;
+
+        // Tee: forward to HTTP response and collect for result storage
+        let (http_tx, http_rx) = tokio::sync::mpsc::channel::<Result<Bytes>>(8);
+        let (store_tx, store_rx) = tokio::sync::mpsc::channel::<Bytes>(8);
+
+        tokio::spawn(async move {
+            futures::pin_mut!(storage_stream);
+            while let Some(chunk) = storage_stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        let _ = store_tx.send(bytes.clone()).await;
+                        if http_tx.send(Ok(bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = http_tx.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        let bg_storage = state.result_storage.clone();
+        let bg_hash = params_hash;
+        let bg_format = source_format;
+        tokio::spawn(async move {
+            let mut chunks: Vec<Bytes> = Vec::new();
+            let mut rx = store_rx;
+            while let Some(chunk) = rx.recv().await {
+                chunks.push(chunk);
+            }
+            if !chunks.is_empty() {
+                let mut total = bytes::BytesMut::new();
+                for chunk in chunks {
+                    total.extend_from_slice(&chunk);
+                }
+                let audio_buf = AudioBuffer::from_bytes_with_format(total.freeze(), bg_format);
+                if let Err(e) = bg_storage.put(&bg_hash, &audio_buf).await {
+                    warn!("Failed to save result audio [{}]: {}", &bg_hash, e);
+                }
+            }
+        });
+
+        let http_stream = futures::stream::unfold(http_rx, |mut rx| async move {
+            rx.recv()
+                .await
+                .map(|item| (item.map_err(|e| std::io::Error::other(e.to_string())), rx))
+        });
+
+        return Response::builder()
+            .header(header::CONTENT_TYPE, mime)
+            .body(Body::from_stream(http_stream))
+            .map_err(|e| e500(eyre!("Failed to build response: {}", e)));
+    }
+
+    // Non-passthrough: fetch entire source into memory (FFmpeg needs seekable input)
+    let blob = if is_remote {
         fetch_audio_buffer(&state.http_client, &params.key).await?
     } else {
         state.storage.get(&params.key).await.map_err(|e| {

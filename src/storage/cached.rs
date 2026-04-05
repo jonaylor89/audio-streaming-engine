@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 
 use crate::blob::AudioBuffer;
 use crate::config::LocalCacheSettings;
+use crate::storage::backend::ByteStream;
 use crate::storage::AudioStorage;
 
 #[derive(Clone)]
@@ -130,6 +131,64 @@ impl<S: AudioStorage + Clone + Send + Sync + 'static> AudioStorage for CachedSto
         let blob = self.inner.get(key).await?;
         self.write_to_cache(key, &blob).await;
         Ok(blob)
+    }
+
+    async fn get_stream(&self, key: &str) -> Result<ByteStream> {
+        // If the file is already in the local cache, stream from disk
+        let cache_path = self.cache_path(key);
+        if cache_path.exists() {
+            debug!(key, "streaming from local cache");
+            let file = tokio::fs::File::open(cache_path).await?;
+            let stream = tokio_util::io::ReaderStream::new(file);
+            return Ok(Box::pin(futures::stream::StreamExt::map(stream, |r| {
+                r.map_err(|e| e.into())
+            })));
+        }
+
+        // Cache miss: stream from inner and tee to cache in background
+        let inner_stream = self.inner.get_stream(key).await?;
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes>>(8);
+        let bg_cache_path = cache_path;
+        let bg_notify = self.evict_notify.clone();
+
+        // Tee task: forward chunks to the HTTP consumer channel and collect for caching
+        tokio::spawn(async move {
+            use futures::StreamExt;
+
+            futures::pin_mut!(inner_stream);
+            let mut cache_buf = bytes::BytesMut::new();
+            while let Some(chunk) = inner_stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        cache_buf.extend_from_slice(&bytes);
+                        if tx.send(Ok(bytes)).await.is_err() {
+                            return; // consumer disconnected
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                }
+            }
+
+            // Write collected bytes to local cache
+            if !cache_buf.is_empty() {
+                if let Some(parent) = bg_cache_path.parent() {
+                    let _ = fs::create_dir_all(parent).await;
+                }
+                if let Err(e) = fs::write(&bg_cache_path, &cache_buf).await {
+                    warn!(error = %e, "failed to write stream to local cache");
+                } else {
+                    debug!("cached streamed source blob locally");
+                    bg_notify.notify_one();
+                }
+            }
+        });
+
+        Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        })))
     }
 
     async fn put(&self, key: &str, blob: &AudioBuffer) -> Result<()> {

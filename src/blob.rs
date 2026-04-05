@@ -29,7 +29,7 @@ impl AudioFormat {
         }
     }
 
-    fn from_extension(ext: &str) -> Self {
+    pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
             "mp3" => Self::Mp3,
             "wav" => Self::Wav,

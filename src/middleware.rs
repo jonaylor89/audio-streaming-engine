@@ -1,6 +1,7 @@
 use crate::state::AppStateDyn;
 use crate::streamingpath::hasher::{suffix_result_storage_hasher, verify_hash};
 use crate::streamingpath::params::Params;
+use crate::streamingpath::strip_route_prefix;
 use crate::utils::{AppError, e400, e416, e500};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode, header};
 use axum::{
@@ -87,12 +88,7 @@ pub async fn auth_middleware(
 ) -> Result<impl IntoResponse, AppError> {
     let path = params.to_string();
 
-    let hash = req
-        .uri()
-        .path()
-        .trim_start_matches("/meta")
-        .trim_start_matches("/stream")
-        .trim_start_matches("/thumbnail")
+    let hash = strip_route_prefix(req.uri().path())
         .strip_prefix("/")
         .and_then(|s| s.split("/").next())
         .ok_or_else(|| e400(eyre!("Failed to parse URI hash")))?;

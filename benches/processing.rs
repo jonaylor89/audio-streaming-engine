@@ -469,6 +469,82 @@ mod pipeline {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming input: storage.get_stream() passthrough vs buffered passthrough
+// Measures the benefit of not buffering the entire file into memory.
+// ---------------------------------------------------------------------------
+mod streaming_input {
+    use super::*;
+    use streaming_engine::storage::{file::FileStorage, AudioStorage};
+    use streaming_engine::streamingpath::normalize::SafeCharsType;
+
+    fn setup_storage(dir: &std::path::Path) -> Arc<dyn AudioStorage> {
+        let src_dir = dir.join("source");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("uploads/sample1.mp3");
+        let dest = src_dir.join("audio/sample1.mp3");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::copy(&fixture, &dest).unwrap();
+        Arc::new(FileStorage::new(
+            src_dir,
+            "audio".into(),
+            SafeCharsType::Default,
+        ))
+    }
+
+    /// Baseline: buffered passthrough via storage.get() + clone
+    #[divan::bench(ignore = cfg!(codspeed))]
+    fn buffered_passthrough(bencher: Bencher<'_, '_>) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = setup_storage(dir.path());
+        let rt = rt();
+
+        bencher.bench(|| {
+            rt.block_on(async {
+                let buf = storage.get("sample1.mp3").await.unwrap();
+                black_box(buf.len())
+            })
+        });
+    }
+
+    /// New: streaming passthrough via storage.get_stream() — drain all chunks
+    #[divan::bench(ignore = cfg!(codspeed))]
+    fn streaming_passthrough_drain(bencher: Bencher<'_, '_>) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = setup_storage(dir.path());
+        let rt = rt();
+
+        bencher.bench(|| {
+            rt.block_on(async {
+                let stream = storage.get_stream("sample1.mp3").await.unwrap();
+                futures::pin_mut!(stream);
+                let mut total = 0usize;
+                while let Some(chunk) = stream.next().await {
+                    total += chunk.unwrap().len();
+                }
+                black_box(total)
+            })
+        });
+    }
+
+    /// TTFB: time to first byte via streaming input
+    #[divan::bench(ignore = cfg!(codspeed))]
+    fn streaming_passthrough_ttfb(bencher: Bencher<'_, '_>) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = setup_storage(dir.path());
+        let rt = rt();
+
+        bencher.bench(|| {
+            rt.block_on(async {
+                let stream = storage.get_stream("sample1.mp3").await.unwrap();
+                futures::pin_mut!(stream);
+                let first = stream.next().await;
+                black_box(first.unwrap().unwrap().len())
+            })
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Thumbnail analysis pipeline (PCM → chroma → SSM → analyze)
 // ---------------------------------------------------------------------------
 mod thumbnail {

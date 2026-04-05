@@ -12,7 +12,7 @@ use tracing::info;
 use url::form_urlencoded;
 use utoipa::ToSchema;
 
-use crate::blob::AudioFormat;
+use crate::{blob::AudioFormat, streamingpath::strip_route_prefix};
 
 #[derive(Debug)]
 pub struct StreamingPath {
@@ -33,11 +33,7 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         // Access the URI and perform your custom parsing logic
         let uri = &parts.uri;
-        let path = uri
-            .path()
-            .trim_start_matches("/params")
-            .trim_start_matches("/meta")
-            .trim_start_matches("/thumbnail");
+        let path = strip_route_prefix(uri.path());
 
         // Parse query string into a HashMap
         let query_params_string = uri.query().unwrap_or("");

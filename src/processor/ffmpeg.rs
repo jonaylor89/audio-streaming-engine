@@ -14,7 +14,13 @@ use crate::{
 use ffmpeg::{AudioProcessor, OutputFormat, ProcessOptions};
 
 fn is_passthrough_request(input: &AudioBuffer, params: &Params) -> bool {
-    params.format.is_none_or(|format| format == input.format())
+    is_passthrough_for_format(input.format(), params)
+}
+
+/// Check if a request is a passthrough given only the source format.
+/// Useful for deciding to stream directly from storage without buffering.
+pub fn is_passthrough_for_format(format: AudioFormat, params: &Params) -> bool {
+    params.format.is_none_or(|f| f == format)
         && params.codec.is_none()
         && params.sample_rate.is_none()
         && params.channels.is_none()

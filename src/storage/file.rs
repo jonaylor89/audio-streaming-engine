@@ -1,4 +1,5 @@
 use crate::blob::AudioBuffer;
+use crate::storage::backend::ByteStream;
 use crate::storage::AudioStorage;
 use crate::streamingpath::normalize::{SafeCharsType, normalize};
 use async_trait::async_trait;
@@ -7,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::io::ReaderStream;
 use tracing::debug;
 
 #[derive(Debug, Clone)]
@@ -60,6 +62,20 @@ impl AudioStorage for FileStorage {
 
         tokio::fs::remove_file(full_path).await?;
         Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn get_stream(&self, key: &str) -> Result<ByteStream> {
+        let full_path = self.get_full_path(key);
+        if let Some(p) = full_path.to_str() {
+            debug!("streaming full path {}", p);
+        }
+
+        let file = File::open(full_path).await?;
+        let stream = ReaderStream::new(file);
+        Ok(Box::pin(futures::stream::StreamExt::map(stream, |r| {
+            r.map_err(|e| e.into())
+        })))
     }
 
     #[tracing::instrument(skip(self))]
