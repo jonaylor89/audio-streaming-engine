@@ -72,10 +72,10 @@ pub async fn meta_handler(
     };
 
     // Populate response cache in background
-    if let Some(Extension(ctx)) = cache_miss {
-        if let Ok(json_bytes) = serde_json::to_vec(&metadata) {
-            ctx.populate(Bytes::from(json_bytes));
-        }
+    if let Some(Extension(ctx)) = cache_miss
+        && let Ok(json_bytes) = serde_json::to_vec(&metadata)
+    {
+        ctx.populate(Bytes::from(json_bytes));
     }
 
     Ok(Json(metadata))

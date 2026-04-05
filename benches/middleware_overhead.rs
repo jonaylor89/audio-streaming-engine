@@ -22,9 +22,9 @@ fn make_body(size: usize) -> Bytes {
 }
 
 const SIZES: &[usize] = &[
-    1024,            // 1 KB
-    100 * 1024,      // 100 KB
-    1024 * 1024,     // 1 MB
+    1024,             // 1 KB
+    100 * 1024,       // 100 KB
+    1024 * 1024,      // 1 MB
     10 * 1024 * 1024, // 10 MB
 ];
 
@@ -52,7 +52,10 @@ fn old_miss_path(body: Bytes, request_headers: &HeaderMap) -> Response<Body> {
                 )
                 .header(header::CACHE_CONTROL, "no-cache")
                 .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .header(header::CONTENT_DISPOSITION, HeaderValue::from_static("inline"))
+                .header(
+                    header::CONTENT_DISPOSITION,
+                    HeaderValue::from_static("inline"),
+                )
                 .body(Body::from(content))
                 .unwrap()
         }
@@ -62,7 +65,10 @@ fn old_miss_path(body: Bytes, request_headers: &HeaderMap) -> Response<Body> {
             .header(header::CONTENT_LENGTH, body.len().to_string())
             .header(header::CACHE_CONTROL, "no-cache")
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .header(header::CONTENT_DISPOSITION, HeaderValue::from_static("inline"))
+            .header(
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static("inline"),
+            )
             .body(Body::from(body))
             .unwrap(),
     }
@@ -73,7 +79,11 @@ fn parse_range(headers: &HeaderMap, total: usize) -> Option<(usize, usize)> {
     let s = range.to_str().ok()?.strip_prefix("bytes=")?;
     let (start, end) = s.split_once('-')?;
     let start: usize = start.parse().ok()?;
-    let end = if end.is_empty() { total - 1 } else { end.parse().ok()? };
+    let end = if end.is_empty() {
+        total - 1
+    } else {
+        end.parse().ok()?
+    };
     Some((start, end.min(total - 1)))
 }
 
@@ -101,8 +111,9 @@ mod old_middleware_miss {
             .bench_values(|response| {
                 rt.block_on(async {
                     // Step 1: to_bytes — this is the expensive call
-                    let body_bytes =
-                        axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
 
                     // Step 2 + 3: clone + rebuild
                     divan::black_box(old_miss_path(body_bytes, &headers));

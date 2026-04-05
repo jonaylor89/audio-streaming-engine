@@ -1,4 +1,6 @@
-use crate::{cache::AudioCache, processor::AudioProcessor, storage::AudioStorage};
+use crate::{
+    cache::AudioCache, inflight::InflightTracker, processor::AudioProcessor, storage::AudioStorage,
+};
 use reqwest::Client;
 use secrecy::SecretString;
 use std::sync::Arc;
@@ -25,4 +27,5 @@ pub struct AppStateDyn {
     pub http_client: Client,
     pub web_config: Option<WebConfig>,
     pub hmac_secret: SecretString,
+    pub inflight: Arc<InflightTracker>,
 }

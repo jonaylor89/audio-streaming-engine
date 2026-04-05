@@ -273,16 +273,26 @@ mod tests {
         let _ = cached.get("a.mp3").await.unwrap();
         let _ = cached.get("b.mp3").await.unwrap();
 
-        // Yield to let the background eviction task run after the notify
-        tokio::task::yield_now().await;
-
-        // Cache dir should have at most 1 file (the latest) since eviction runs after writes
-        let mut count = 0;
-        let mut dir = fs::read_dir(temp.path()).await.unwrap();
-        while dir.next_entry().await.unwrap().is_some() {
-            count += 1;
+        // Poll until the background eviction task has run. The single
+        // `yield_now` that was here before was not enough — the eviction
+        // task needs to wake, read the directory, and delete files, which
+        // may take more than one scheduler tick under load.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let mut count = 0u32;
+            let mut dir = fs::read_dir(temp.path()).await.unwrap();
+            while dir.next_entry().await.unwrap().is_some() {
+                count += 1;
+            }
+            if count <= 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "eviction did not reduce cache to <= 1 file within 2 s (found {count})"
+            );
         }
-        assert!(count <= 1);
     }
 
     #[tokio::test]

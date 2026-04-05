@@ -1,6 +1,7 @@
 pub mod blob;
 pub mod cache;
 pub mod config;
+pub mod inflight;
 pub mod metrics;
 pub mod middleware;
 pub mod processor;

@@ -32,7 +32,10 @@ impl CacheMissContext {
     pub fn populate(self, data: Bytes) {
         tokio::spawn(async move {
             if let Err(e) = self.cache.set(&self.cache_key, &data, None).await {
-                warn!("Failed to write response to cache [{}]: {}", &self.cache_key, e);
+                warn!(
+                    "Failed to write response to cache [{}]: {}",
+                    &self.cache_key, e
+                );
             }
         });
     }
@@ -108,7 +111,7 @@ pub async fn auth_middleware(
     Ok(next.run(req).await)
 }
 
-fn build_audio_response(
+pub(crate) fn build_audio_response(
     request_headers: &HeaderMap,
     content_type: &str,
     body: Bytes,

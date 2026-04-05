@@ -1,5 +1,6 @@
 use crate::cache::{AudioCache, Cache};
 use crate::config::{Settings, StorageClient, StorageSettings};
+use crate::inflight::InflightTracker;
 use crate::metrics::{setup_metrics_recorder, track_metrics};
 use crate::middleware::auth_middleware;
 use crate::middleware::cache_middleware;
@@ -244,6 +245,7 @@ where
         http_client,
         web_config,
         hmac_secret,
+        inflight: Arc::new(InflightTracker::new()),
     };
 
     let mut app = Router::new()

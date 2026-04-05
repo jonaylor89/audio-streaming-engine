@@ -183,6 +183,7 @@ dependencies = [
  "codspeed-divan-compat",
  "color-eyre",
  "config",
+ "dashmap",
  "dotenvy",
  "ffmpeg",
  "futures",

@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use std::path::PathBuf;
 use streaming_engine::{
-    config::get_configuration,
+    config::{CacheSettings, FilesystemCacheSettings, StorageSettings, get_configuration},
     startup::Application,
     telemetry::{get_subscriber, init_subscriber},
 };
@@ -29,6 +29,9 @@ pub struct TestApp {
     pub port: u16,
     pub api_client: reqwest::Client,
     server_handle: JoinHandle<()>,
+    /// Per-server temp directory for cache and result storage.
+    /// Automatically cleaned up when the test finishes.
+    _tmp_dir: tempfile::TempDir,
 }
 
 impl Drop for TestApp {
@@ -40,10 +43,22 @@ impl Drop for TestApp {
 pub async fn spawn_app() -> TestApp {
     Lazy::force(&TRACING);
 
+    // Each test server gets its own temp directory so parallel tests
+    // never race on shared cache/results dirs.
+    let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+
     let configuration = {
         let mut c = get_configuration().expect("Failed to read configuration");
         c.port = 0;
-
+        c.application.clear_on_startup = false;
+        c.cache = CacheSettings::Filesystem(FilesystemCacheSettings {
+            base_dir: tmp_dir.path().join("cache").to_str().unwrap().into(),
+            ..Default::default()
+        });
+        c.result_storage = Some(StorageSettings {
+            base_dir: tmp_dir.path().join("results").to_str().unwrap().into(),
+            ..Default::default()
+        });
         c
     };
 
@@ -71,6 +86,7 @@ pub async fn spawn_app() -> TestApp {
         port: application_port,
         api_client: client,
         server_handle,
+        _tmp_dir: tmp_dir,
     }
 }
 

@@ -1,8 +1,7 @@
 use axum::{
     Extension,
-    body::Body,
     extract::{Query, State},
-    http::{Response, header},
+    http::{HeaderMap, header},
     response::IntoResponse,
 };
 use color_eyre::eyre::eyre;
@@ -10,7 +9,7 @@ use serde::Deserialize;
 use tracing::{info, instrument};
 
 use crate::{
-    middleware::CacheMissContext,
+    middleware::{CacheMissContext, build_audio_response},
     remote::fetch_audio_buffer,
     state::AppStateDyn,
     streamingpath::{hasher::suffix_result_storage_hasher, params::Params},
@@ -25,9 +24,18 @@ pub struct ThumbnailQuery {
     pub thumbnail_max_duration: Option<f64>,
 }
 
-#[instrument(skip(state, cache_miss))]
+/// Detect MIME type from the raw audio bytes using magic-byte sniffing,
+/// matching the same approach used by `cache_middleware` on cache hits.
+fn sniff_content_type(buf: &[u8]) -> String {
+    infer::get(buf)
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "audio/mpeg".to_string())
+}
+
+#[instrument(skip(state, headers, cache_miss))]
 pub async fn thumbnail_handler(
     State(state): State<AppStateDyn>,
+    headers: HeaderMap,
     cache_miss: Option<Extension<CacheMissContext>>,
     Query(query): Query<ThumbnailQuery>,
     params: Params,
@@ -51,14 +59,11 @@ pub async fn thumbnail_handler(
     let cache_miss_ctx = cache_miss.map(|Extension(ctx)| ctx);
 
     if let Ok(blob) = result {
+        let body = blob.into_bytes();
         if let Some(ctx) = cache_miss_ctx {
-            ctx.populate(blob.clone().into_bytes());
+            ctx.populate(body.clone());
         }
-        return Response::builder()
-            .header(header::CONTENT_TYPE, blob.mime_type())
-            .header(header::CONTENT_LENGTH, blob.len().to_string())
-            .body(Body::from(blob.into_bytes()))
-            .map_err(|e| e500(eyre!("Failed to build response: {}", e)));
+        return build_audio_response(&headers, &sniff_content_type(&body), body);
     }
 
     // Fetch source audio
@@ -141,22 +146,30 @@ pub async fn thumbnail_handler(
         thumb_params.key, thumbnail_result.start_time, thumbnail_result.duration
     );
 
-    Response::builder()
-        .header(header::CONTENT_TYPE, processed.mime_type())
-        .header(header::CONTENT_LENGTH, processed.len().to_string())
-        .header(
-            "X-Thumbnail-Confidence",
-            format!("{:.2}", thumbnail_result.confidence),
-        )
-        .header(
-            "X-Thumbnail-Start",
-            format!("{:.1}", thumbnail_result.start_time),
-        )
-        .header(
-            "X-Thumbnail-Duration",
-            format!("{:.1}", thumbnail_result.duration),
-        )
-        .header("Link", format!("<{}>; rel=canonical", canonical))
-        .body(Body::from(processed.into_bytes()))
-        .map_err(|e| e500(eyre!("Failed to build response: {}", e)))
+    // Build range-aware response, then append thumbnail-specific headers.
+    let body = processed.into_bytes();
+    let content_type = sniff_content_type(&body);
+    let mut response = build_audio_response(&headers, &content_type, body)?;
+    let h = response.headers_mut();
+    h.insert(
+        "X-Thumbnail-Confidence",
+        format!("{:.2}", thumbnail_result.confidence)
+            .parse()
+            .unwrap(),
+    );
+    h.insert(
+        "X-Thumbnail-Start",
+        format!("{:.1}", thumbnail_result.start_time)
+            .parse()
+            .unwrap(),
+    );
+    h.insert(
+        "X-Thumbnail-Duration",
+        format!("{:.1}", thumbnail_result.duration).parse().unwrap(),
+    );
+    h.insert(
+        header::LINK,
+        format!("<{}>; rel=canonical", canonical).parse().unwrap(),
+    );
+    Ok(response)
 }
