@@ -61,6 +61,14 @@ impl WriteBuffer {
         Self { data: Vec::new() }
     }
 
+    /// Pre-allocate based on an expected output size hint.
+    /// A good heuristic is `input_size / 2` for compressed output.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            data: Vec::with_capacity(capacity),
+        }
+    }
+
     pub fn into_inner(self) -> Vec<u8> {
         self.data
     }
@@ -232,6 +240,12 @@ pub struct OutputContext {
 
 impl OutputContext {
     pub fn open(format_name: &str) -> Result<Self, FfmpegError> {
+        Self::open_with_capacity(format_name, 0)
+    }
+
+    /// Open with a pre-allocated write buffer.
+    /// `size_hint` is the expected output size in bytes (0 = no pre-allocation).
+    pub fn open_with_capacity(format_name: &str, size_hint: usize) -> Result<Self, FfmpegError> {
         let format_c = CString::new(format_name).unwrap();
 
         // Allocate output format context
@@ -255,8 +269,12 @@ impl OutputContext {
             )));
         }
 
-        // Allocate write buffer
-        let write_buf = Box::into_raw(Box::new(WriteBuffer::new()));
+        // Allocate write buffer with optional pre-allocation
+        let write_buf = if size_hint > 0 {
+            Box::into_raw(Box::new(WriteBuffer::with_capacity(size_hint)))
+        } else {
+            Box::into_raw(Box::new(WriteBuffer::new()))
+        };
 
         // Allocate AVIO buffer
         let avio_buffer = unsafe { av_malloc(AVIO_BUFFER_SIZE) } as *mut u8;

@@ -513,8 +513,9 @@ impl AudioProcessor {
     #[instrument(skip(self, opts), fields(input_size = opts.input.len()))]
     pub fn process(&self, opts: ProcessOptions<'_>) -> Result<Vec<u8>, FfmpegError> {
         let output_format_name = opts.output_format.format.clone();
+        let size_hint = opts.input.len() / 2;
         let ctx = self.setup_pipeline(opts)?;
-        let mut output = OutputContext::open(&output_format_name)?;
+        let mut output = OutputContext::open_with_capacity(&output_format_name, size_hint)?;
         self.run_to_output(ctx, &mut output)?;
         let result = output.take_output();
         debug!(output_size = result.len(), "Processing complete");
