@@ -2,7 +2,7 @@
 //!
 //! Computes 12-bin pitch class profiles from audio samples.
 
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{FftPlanner, num_complex::Complex};
 
 const NUM_CHROMA: usize = 12;
 
@@ -76,7 +76,7 @@ fn build_bin_chroma_map(fft_size: usize, sample_rate: i32) -> Vec<Option<usize>>
 
     for bin in 1..half {
         let freq = bin as f64 * sample_rate as f64 / fft_size as f64;
-        if freq < 32.0 || freq > 8000.0 {
+        if !(32.0..=8000.0).contains(&freq) {
             continue;
         }
 
@@ -109,9 +109,7 @@ mod tests {
         let duration_samples = sample_rate as usize * 5;
         // 440 Hz sine wave (A4 = chroma bin 9)
         let samples: Vec<f32> = (0..duration_samples)
-            .map(|i| {
-                (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate as f32).sin()
-            })
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate as f32).sin())
             .collect();
 
         let hop_size = sample_rate as usize / 2;

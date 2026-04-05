@@ -1,7 +1,7 @@
+use color_eyre::Result;
 use streaming_engine::config::get_configuration;
 use streaming_engine::startup::Application;
 use streaming_engine::telemetry::{get_subscriber, init_subscriber};
-use color_eyre::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {

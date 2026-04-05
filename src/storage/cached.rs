@@ -9,8 +9,8 @@ use tracing::{debug, warn};
 
 use crate::blob::AudioBuffer;
 use crate::config::LocalCacheSettings;
-use crate::storage::backend::ByteStream;
 use crate::storage::AudioStorage;
+use crate::storage::backend::ByteStream;
 
 #[derive(Clone)]
 pub struct CachedStorage<S> {

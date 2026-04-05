@@ -27,14 +27,8 @@ pub fn find_best_segment(
     while length <= max_len && length <= num_frames {
         let mut start = 0;
         while start + length <= num_frames {
-            let fitness = segment_fitness(
-                ssm,
-                num_frames,
-                start,
-                length,
-                target_len,
-                sim_threshold,
-            );
+            let fitness =
+                segment_fitness(ssm, num_frames, start, length, target_len, sim_threshold);
 
             if fitness > best_fitness {
                 best_fitness = fitness;

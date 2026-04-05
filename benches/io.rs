@@ -5,8 +5,8 @@ fn main() {
 use divan::Bencher;
 use streaming_engine::{
     blob::AudioBuffer,
-    cache::{fs::FileSystemCache, AudioCache},
-    storage::{file::FileStorage, AudioStorage},
+    cache::{AudioCache, fs::FileSystemCache},
+    storage::{AudioStorage, file::FileStorage},
     streamingpath::normalize::SafeCharsType,
 };
 use tempfile::tempdir;
@@ -77,9 +77,7 @@ mod filesystem_cache {
         let cache = rt.block_on(async { FileSystemCache::new(dir.path(), 1000).unwrap() });
         let data = generate_audio_data(size_kb);
 
-        bencher.bench(|| {
-            rt.block_on(async { cache.set("bench_key", &data, None).await.unwrap() })
-        });
+        bencher.bench(|| rt.block_on(async { cache.set("bench_key", &data, None).await.unwrap() }));
     }
 
     #[divan::bench(args = SIZES_KB)]
@@ -93,9 +91,7 @@ mod filesystem_cache {
             c
         });
 
-        bencher.bench(|| {
-            rt.block_on(async { cache.get("bench_key").await.unwrap() })
-        });
+        bencher.bench(|| rt.block_on(async { cache.get("bench_key").await.unwrap() }));
     }
 }
 
@@ -128,8 +124,6 @@ mod storage_vs_cache {
         let cache = rt.block_on(async { FileSystemCache::new(dir.path(), 1000).unwrap() });
         let data = generate_audio_data(size_kb);
 
-        bencher.bench(|| {
-            rt.block_on(async { cache.set("cmp_key", &data, None).await.unwrap() })
-        });
+        bencher.bench(|| rt.block_on(async { cache.set("cmp_key", &data, None).await.unwrap() }));
     }
 }

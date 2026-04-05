@@ -2,7 +2,7 @@ use crate::helpers::{load_fixture_bytes, load_fixture_pcm};
 use streaming_engine::blob::{AudioBuffer, AudioFormat};
 use streaming_engine::processor::{AudioProcessor, Processor};
 use streaming_engine::streamingpath::params::Params;
-use streaming_engine::thumbnail::{analyze, chroma, ssm, ThumbnailConfig};
+use streaming_engine::thumbnail::{ThumbnailConfig, analyze, chroma, ssm};
 
 #[test]
 fn analyze_selects_valid_subsection() {
@@ -109,7 +109,10 @@ fn ssm_has_diagonal_ones_and_structural_variation() {
     let max = off.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
     eprintln!("SSM off-diagonal: min={min:.3}, max={max:.3}");
-    assert!(max - min > 0.05, "SSM has no variation ({min:.3}..{max:.3})");
+    assert!(
+        max - min > 0.05,
+        "SSM has no variation ({min:.3}..{max:.3})"
+    );
 }
 
 /// End-to-end: analyze → process with start_time/duration → verify output is audible.
@@ -151,7 +154,11 @@ async fn processed_thumbnail_audio_is_not_silent() {
         processed.len(),
         processed.format(),
     );
-    assert!(processed.len() > 100, "output too small: {} bytes", processed.len());
+    assert!(
+        processed.len() > 100,
+        "output too small: {} bytes",
+        processed.len()
+    );
 
     // Step 3: decode the OUTPUT back to PCM and check it's not silent
     let output_pcm = ffmpeg::decode_to_pcm(processed.into_bytes()).unwrap();

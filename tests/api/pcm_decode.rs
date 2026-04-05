@@ -15,7 +15,11 @@ fn decode_fixture_to_valid_pcm() {
 
     // Duration
     let duration = pcm.samples.len() as f64 / pcm.sample_rate as f64;
-    assert!(duration > 1.0, "expected > 1s of audio, got {:.2}s", duration);
+    assert!(
+        duration > 1.0,
+        "expected > 1s of audio, got {:.2}s",
+        duration
+    );
 
     // No NaN/Inf
     assert!(

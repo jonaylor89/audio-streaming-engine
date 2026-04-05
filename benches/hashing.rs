@@ -12,7 +12,7 @@ use streaming_engine::{
             compute_hash, digest_result_storage_hasher, digest_storage_hasher,
             suffix_result_storage_hasher, verify_hash,
         },
-        normalize::{normalize, SafeCharsType},
+        normalize::{SafeCharsType, normalize},
         params::Params,
     },
 };
@@ -48,10 +48,7 @@ fn complex_params() -> Params {
             tags.insert("title".to_string(), "Test Song".to_string());
             tags
         }),
-        custom_filters: Some(vec![
-            "volume=0.5".to_string(),
-            "highpass=f=200".to_string(),
-        ]),
+        custom_filters: Some(vec!["volume=0.5".to_string(), "highpass=f=200".to_string()]),
         ..Default::default()
     }
 }

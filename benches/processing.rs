@@ -2,7 +2,7 @@ fn main() {
     divan::main();
 }
 
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 use futures::StreamExt;
 use std::fs;
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use streaming_engine::{
     config::ProcessorSettings,
     processor::{AudioProcessor, Processor},
     streamingpath::params::Params,
-    thumbnail::{analyze, chroma::extract_chroma, ssm::build_ssm, ThumbnailConfig},
+    thumbnail::{ThumbnailConfig, analyze, chroma::extract_chroma, ssm::build_ssm},
 };
 
 static SAMPLE_MP3: LazyLock<AudioBuffer> = LazyLock::new(|| {
@@ -74,7 +74,10 @@ mod passthrough {
 
         bencher.bench(|| {
             rt.block_on(async {
-                black_box(proc.process(black_box(&*SAMPLE_MP3), black_box(&params)).await)
+                black_box(
+                    proc.process(black_box(&*SAMPLE_MP3), black_box(&params))
+                        .await,
+                )
             })
         });
     }
@@ -90,7 +93,10 @@ mod passthrough {
 
         bencher.bench(|| {
             rt.block_on(async {
-                black_box(proc.process(black_box(&*TEST_WAV), black_box(&params)).await)
+                black_box(
+                    proc.process(black_box(&*TEST_WAV), black_box(&params))
+                        .await,
+                )
             })
         });
     }
@@ -113,7 +119,10 @@ mod transcode {
 
         bencher.bench(|| {
             rt.block_on(async {
-                black_box(proc.process(black_box(&*SAMPLE_MP3), black_box(&params)).await)
+                black_box(
+                    proc.process(black_box(&*SAMPLE_MP3), black_box(&params))
+                        .await,
+                )
             })
         });
     }
@@ -130,7 +139,10 @@ mod transcode {
 
         bencher.bench(|| {
             rt.block_on(async {
-                black_box(proc.process(black_box(&*TEST_WAV), black_box(&params)).await)
+                black_box(
+                    proc.process(black_box(&*TEST_WAV), black_box(&params))
+                        .await,
+                )
             })
         });
     }
@@ -155,7 +167,10 @@ mod filters {
 
         bencher.bench(|| {
             rt.block_on(async {
-                black_box(proc.process(black_box(&*SAMPLE_MP3), black_box(&params)).await)
+                black_box(
+                    proc.process(black_box(&*SAMPLE_MP3), black_box(&params))
+                        .await,
+                )
             })
         });
     }
@@ -175,7 +190,10 @@ mod filters {
 
         bencher.bench(|| {
             rt.block_on(async {
-                black_box(proc.process(black_box(&*SAMPLE_MP3), black_box(&params)).await)
+                black_box(
+                    proc.process(black_box(&*SAMPLE_MP3), black_box(&params))
+                        .await,
+                )
             })
         });
     }
@@ -191,9 +209,7 @@ mod filters {
             normalize: Some(true),
             lowpass: Some(16000.0),
             highpass: Some(40.0),
-            compressor: Some(
-                "threshold=0.125:ratio=4:attack=20:release=200:makeup=1".into(),
-            ),
+            compressor: Some("threshold=0.125:ratio=4:attack=20:release=200:makeup=1".into()),
             fade_in: Some(1.0),
             fade_out: Some(2.0),
             ..Default::default()
@@ -201,7 +217,10 @@ mod filters {
 
         bencher.bench(|| {
             rt.block_on(async {
-                black_box(proc.process(black_box(&*SAMPLE_MP3), black_box(&params)).await)
+                black_box(
+                    proc.process(black_box(&*SAMPLE_MP3), black_box(&params))
+                        .await,
+                )
             })
         });
     }
@@ -295,7 +314,7 @@ mod streaming_vs_buffered {
 mod pipeline {
     use super::*;
     use streaming_engine::{
-        storage::{file::FileStorage, AudioStorage},
+        storage::{AudioStorage, file::FileStorage},
         streamingpath::{hasher::suffix_result_storage_hasher, normalize::SafeCharsType},
     };
 
@@ -339,9 +358,7 @@ mod pipeline {
                 key: "sample1.mp3".into(),
                 format: Some(AudioFormat::Mp3),
                 normalize: Some(true),
-                compressor: Some(
-                    "threshold=0.125:ratio=3:attack=20:release=200:makeup=1".into(),
-                ),
+                compressor: Some("threshold=0.125:ratio=3:attack=20:release=200:makeup=1".into()),
                 ..Default::default()
             },
             FullChain => Params {
@@ -350,9 +367,7 @@ mod pipeline {
                 volume: Some(0.85),
                 lowpass: Some(14000.0),
                 highpass: Some(80.0),
-                compressor: Some(
-                    "threshold=0.125:ratio=4:attack=20:release=200:makeup=1".into(),
-                ),
+                compressor: Some("threshold=0.125:ratio=4:attack=20:release=200:makeup=1".into()),
                 fade_in: Some(1.0),
                 fade_out: Some(2.0),
                 ..Default::default()
@@ -474,7 +489,7 @@ mod pipeline {
 // ---------------------------------------------------------------------------
 mod streaming_input {
     use super::*;
-    use streaming_engine::storage::{file::FileStorage, AudioStorage};
+    use streaming_engine::storage::{AudioStorage, file::FileStorage};
     use streaming_engine::streamingpath::normalize::SafeCharsType;
 
     fn setup_storage(dir: &std::path::Path) -> Arc<dyn AudioStorage> {
@@ -552,10 +567,8 @@ mod thumbnail {
 
     #[divan::bench(ignore = cfg!(codspeed))]
     fn decode_to_pcm(bencher: Bencher<'_, '_>) {
-        let raw = fs::read(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("uploads/sample1.mp3"),
-        )
-        .unwrap();
+        let raw = fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("uploads/sample1.mp3"))
+            .unwrap();
 
         bencher
             .with_inputs(|| bytes::Bytes::from(raw.clone()))
@@ -567,8 +580,7 @@ mod thumbnail {
         let f = &*PCM;
         let hop = f.sample_rate as usize / 2;
 
-        bencher
-            .bench(|| black_box(extract_chroma(black_box(&f.samples), f.sample_rate, hop)));
+        bencher.bench(|| black_box(extract_chroma(black_box(&f.samples), f.sample_rate, hop)));
     }
 
     #[divan::bench(ignore = cfg!(codspeed))]

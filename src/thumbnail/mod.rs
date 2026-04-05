@@ -111,7 +111,10 @@ pub fn analyze(
     // Clamp to not exceed track bounds
     let duration = duration.min(total_duration - start_time);
 
-    info!(start_time, duration, confidence, "Thumbnail analysis complete");
+    info!(
+        start_time,
+        duration, confidence, "Thumbnail analysis complete"
+    );
 
     Ok(ThumbnailResult {
         start_time,
