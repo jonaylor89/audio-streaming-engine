@@ -1,4 +1,5 @@
 use axum::{
+    Extension,
     body::Body,
     extract::State,
     http::{Response, header},
@@ -8,17 +9,20 @@ use color_eyre::eyre::eyre;
 use tracing::{info, instrument, warn};
 
 use crate::{
+    middleware::CacheMissContext,
     remote::fetch_audio_buffer,
     state::AppStateDyn,
     streamingpath::{hasher::suffix_result_storage_hasher, params::Params},
     utils::{AppError, e404, e500},
 };
 
-#[instrument(skip(state))]
+#[instrument(skip(state, cache_miss))]
 pub async fn streamingpath_handler(
     State(state): State<AppStateDyn>,
+    cache_miss: Option<Extension<CacheMissContext>>,
     params: Params,
 ) -> Result<impl IntoResponse, AppError> {
+    let cache_miss_ctx = cache_miss.map(|Extension(ctx)| ctx);
     let params_hash = suffix_result_storage_hasher(&params);
     let result = state
         .result_storage
@@ -28,8 +32,11 @@ pub async fn streamingpath_handler(
             info!("no audio in results storage: {}", &params);
         });
 
-    // Result storage HIT: serve with Content-Length + range support
+    // Result storage HIT: serve with Content-Length
     if let Ok(blob) = result {
+        if let Some(ctx) = cache_miss_ctx {
+            ctx.populate(blob.clone().into_bytes());
+        }
         return Response::builder()
             .header(header::CONTENT_TYPE, blob.mime_type())
             .header(header::CONTENT_LENGTH, blob.len().to_string())
@@ -62,6 +69,11 @@ pub async fn streamingpath_handler(
             warn!("Failed to save result audio [{}]: {}", &bg_hash, e);
         }
     });
+
+    // Populate response cache in background
+    if let Some(ctx) = cache_miss_ctx {
+        ctx.populate(processed.clone().into_bytes());
+    }
 
     Response::builder()
         .header(header::CONTENT_TYPE, processed.mime_type())

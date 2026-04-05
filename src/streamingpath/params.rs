@@ -308,6 +308,156 @@ impl Params {
         Ok(base_params.merge_with(explicit_params))
     }
 
+    /// Write a deterministic, compact representation of these params into `w`
+    /// suitable for hashing. Uses a fixed field order (not HashMap iteration)
+    /// so the output is stable across runs. Writes directly to the sink with
+    /// zero intermediate String/Vec allocations — only stack-local `itoa`/`ryu`
+    /// buffers are used for numeric formatting.
+    pub fn write_hash_input(&self, w: &mut impl fmt::Write) -> fmt::Result {
+        w.write_str(&self.key)?;
+        w.write_char('?')?;
+
+        let mut first = true;
+        // Macro to avoid repeating the separator + key + value boilerplate.
+        macro_rules! kv_str {
+            ($key:literal, $val:expr) => {
+                if let Some(ref v) = $val {
+                    if !first {
+                        w.write_char('&')?;
+                    } else {
+                        first = false;
+                    }
+                    w.write_str($key)?;
+                    w.write_char('=')?;
+                    w.write_str(v)?;
+                }
+            };
+        }
+        macro_rules! kv_i32 {
+            ($key:literal, $val:expr) => {
+                if let Some(v) = $val {
+                    if !first {
+                        w.write_char('&')?;
+                    } else {
+                        first = false;
+                    }
+                    w.write_str($key)?;
+                    w.write_char('=')?;
+                    let mut buf = itoa::Buffer::new();
+                    w.write_str(buf.format(v))?;
+                }
+            };
+        }
+        macro_rules! kv_f64 {
+            ($key:literal, $val:expr) => {
+                if let Some(v) = $val {
+                    if !first {
+                        w.write_char('&')?;
+                    } else {
+                        first = false;
+                    }
+                    w.write_str($key)?;
+                    w.write_char('=')?;
+                    let mut buf = ryu::Buffer::new();
+                    w.write_str(buf.format(v))?;
+                }
+            };
+        }
+        macro_rules! kv_bool {
+            ($key:literal, $val:expr) => {
+                if let Some(v) = $val {
+                    if !first {
+                        w.write_char('&')?;
+                    } else {
+                        first = false;
+                    }
+                    w.write_str($key)?;
+                    w.write_char('=')?;
+                    w.write_str(if v { "true" } else { "false" })?;
+                }
+            };
+        }
+
+        // Fixed field order — must never change or cached hashes invalidate.
+        if let Some(ref fmt) = self.format {
+            if !first {
+                w.write_char('&')?;
+            } else {
+                first = false;
+            }
+            w.write_str("format=")?;
+            w.write_str(fmt.extension())?;
+        }
+        kv_str!("codec", self.codec);
+        kv_i32!("sample_rate", self.sample_rate);
+        kv_i32!("channels", self.channels);
+        kv_i32!("bit_rate", self.bit_rate);
+        kv_i32!("bit_depth", self.bit_depth);
+        kv_f64!("quality", self.quality);
+        kv_i32!("compression_level", self.compression_level);
+        kv_f64!("start_time", self.start_time);
+        kv_f64!("duration", self.duration);
+        kv_f64!("speed", self.speed);
+        kv_bool!("reverse", self.reverse);
+        kv_f64!("volume", self.volume);
+        kv_bool!("normalize", self.normalize);
+        kv_f64!("normalize_level", self.normalize_level);
+        kv_f64!("lowpass", self.lowpass);
+        kv_f64!("highpass", self.highpass);
+        kv_str!("bandpass", self.bandpass);
+        kv_f64!("bass", self.bass);
+        kv_f64!("treble", self.treble);
+        kv_str!("echo", self.echo);
+        kv_str!("chorus", self.chorus);
+        kv_str!("flanger", self.flanger);
+        kv_str!("phaser", self.phaser);
+        kv_str!("tremolo", self.tremolo);
+        kv_str!("compressor", self.compressor);
+        kv_str!("noise_reduction", self.noise_reduction);
+        kv_f64!("fade_in", self.fade_in);
+        kv_f64!("fade_out", self.fade_out);
+        kv_f64!("cross_fade", self.cross_fade);
+        if let Some(ref filters) = self.custom_filters {
+            for f in filters {
+                if !first {
+                    w.write_char('&')?;
+                } else {
+                    first = false;
+                }
+                w.write_str("filter=")?;
+                w.write_str(f)?;
+            }
+        }
+        if let Some(ref options) = self.custom_options {
+            for o in options {
+                if !first {
+                    w.write_char('&')?;
+                } else {
+                    first = false;
+                }
+                w.write_str("option=")?;
+                w.write_str(o)?;
+            }
+        }
+        if let Some(ref tags) = self.tags {
+            let mut keys: Vec<&String> = tags.keys().collect();
+            keys.sort();
+            for k in keys {
+                if !first {
+                    w.write_char('&')?;
+                } else {
+                    first = false;
+                }
+                w.write_str("tag_")?;
+                w.write_str(k)?;
+                w.write_char('=')?;
+                w.write_str(&tags[k])?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn to_query(&self) -> HashMap<String, Vec<String>> {
         let mut query: HashMap<String, Vec<String>> = HashMap::new();
 

@@ -1,4 +1,5 @@
-use axum::{Json, extract::State};
+use axum::{Extension, Json, extract::State};
+use bytes::Bytes;
 use color_eyre::eyre::eyre;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -6,6 +7,7 @@ use tracing::{info, instrument};
 use utoipa::ToSchema;
 
 use crate::{
+    middleware::CacheMissContext,
     remote::fetch_audio_buffer,
     state::AppStateDyn,
     streamingpath::params::Params,
@@ -24,9 +26,10 @@ pub struct AudioMetadata {
     pub tags: HashMap<String, String>,
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, cache_miss))]
 pub async fn meta_handler(
     State(state): State<AppStateDyn>,
+    cache_miss: Option<Extension<CacheMissContext>>,
     params: Params,
 ) -> Result<Json<AudioMetadata>, AppError> {
     info!("meta: {:?}", params);
@@ -67,6 +70,13 @@ pub async fn meta_handler(
         size: file_meta.size,
         tags: file_meta.tags,
     };
+
+    // Populate response cache in background
+    if let Some(Extension(ctx)) = cache_miss {
+        if let Ok(json_bytes) = serde_json::to_vec(&metadata) {
+            ctx.populate(Bytes::from(json_bytes));
+        }
+    }
 
     Ok(Json(metadata))
 }

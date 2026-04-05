@@ -8,6 +8,7 @@ use hmac::{Hmac, Mac};
 use secrecy::{ExposeSecret, SecretBox, SecretString};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
+use std::fmt;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -18,6 +19,25 @@ pub enum AuthError {
 
     #[error(transparent)]
     UnexpectedError(#[from] Error),
+}
+
+/// Adapter that feeds `fmt::Write` output directly into a `Sha1` hasher,
+/// avoiding any intermediate `String` allocation.
+struct Sha1Writer(Sha1);
+
+impl fmt::Write for Sha1Writer {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.0.update(s.as_bytes());
+        Ok(())
+    }
+}
+
+/// Hash params directly into a Sha1 digest without allocating a String.
+fn hash_params(p: &params::Params) -> sha1::digest::Output<Sha1> {
+    let mut w = Sha1Writer(Sha1::new());
+    // write_hash_input only returns Err on a broken fmt::Write; ours never fails.
+    p.write_hash_input(&mut w).expect("Sha1Writer never fails");
+    w.0.finalize()
 }
 
 fn hex_digest_path(path: &str) -> String {
@@ -31,19 +51,19 @@ pub fn digest_storage_hasher(audio: &str) -> String {
 }
 
 pub fn digest_result_storage_hasher(p: &params::Params) -> String {
-    let path = p.to_string();
-    hex_digest_path(&path)
+    let digest = hash_params(p);
+    let hash = hex::encode(digest);
+    format!("{}/{}/{}", &hash[..2], &hash[2..4], &hash[4..])
 }
 
 pub fn suffix_result_storage_hasher(p: &params::Params) -> String {
-    let path = p.to_string();
-    let digest = Sha1::digest(path.as_bytes());
+    let digest = hash_params(p);
     let hash = format!(".{}", hex::encode(&digest[..10]));
 
     let audio = if p.key.starts_with("https://") {
-        &p.key[8..].to_string()
+        &p.key[8..]
     } else if p.key.starts_with("http://") {
-        &p.key[7..].to_string()
+        &p.key[7..]
     } else {
         &p.key
     };
@@ -55,7 +75,7 @@ pub fn suffix_result_storage_hasher(p: &params::Params) -> String {
         && slash_idx.is_none_or(|idx| idx < dot_idx)
     {
         let ext = if let Some(format) = &p.format {
-            format!(".{}", format.to_string().to_lowercase())
+            format!(".{}", format.extension())
         } else {
             audio[dot_idx..].to_string()
         };

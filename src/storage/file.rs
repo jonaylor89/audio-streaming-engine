@@ -4,8 +4,8 @@ use crate::storage::backend::ByteStream;
 use crate::streamingpath::normalize::{SafeCharsType, normalize};
 use async_trait::async_trait;
 use color_eyre::Result;
-use std::fs;
 use std::path::{Path, PathBuf};
+use tokio::fs;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
@@ -41,7 +41,7 @@ impl AudioStorage for FileStorage {
         }
 
         if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).await?;
         }
         let mut file = OpenOptions::new()
             .write(true)

@@ -1,4 +1,5 @@
 use axum::{
+    Extension,
     body::Body,
     extract::{Query, State},
     http::{Response, header},
@@ -9,6 +10,7 @@ use serde::Deserialize;
 use tracing::{info, instrument};
 
 use crate::{
+    middleware::CacheMissContext,
     remote::fetch_audio_buffer,
     state::AppStateDyn,
     streamingpath::{hasher::suffix_result_storage_hasher, params::Params},
@@ -23,9 +25,10 @@ pub struct ThumbnailQuery {
     pub thumbnail_max_duration: Option<f64>,
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, cache_miss))]
 pub async fn thumbnail_handler(
     State(state): State<AppStateDyn>,
+    cache_miss: Option<Extension<CacheMissContext>>,
     Query(query): Query<ThumbnailQuery>,
     params: Params,
 ) -> Result<impl IntoResponse, AppError> {
@@ -45,7 +48,12 @@ pub async fn thumbnail_handler(
             info!("no thumbnail in results storage: {}", &params);
         });
 
+    let cache_miss_ctx = cache_miss.map(|Extension(ctx)| ctx);
+
     if let Ok(blob) = result {
+        if let Some(ctx) = cache_miss_ctx {
+            ctx.populate(blob.clone().into_bytes());
+        }
         return Response::builder()
             .header(header::CONTENT_TYPE, blob.mime_type())
             .header(header::CONTENT_LENGTH, blob.len().to_string())
@@ -122,6 +130,11 @@ pub async fn thumbnail_handler(
             tracing::warn!("Failed to save thumbnail result [{}]: {}", &bg_hash, e);
         }
     });
+
+    // Populate response cache in background
+    if let Some(ctx) = cache_miss_ctx {
+        ctx.populate(processed.clone().into_bytes());
+    }
 
     let canonical = format!(
         "/unsafe/{}?start_time={:.1}&duration={:.1}",

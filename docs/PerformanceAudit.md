@@ -9,45 +9,68 @@ HTTP Request
     → cache_middleware — Redis/FS hit → 206/200 with Content-Length
 ```
 
-### Cache miss — first request (streaming pipeline)
+### Cache miss — first request (buffered pipeline via `/{*streamingpath}`)
 ```
 HTTP Request
   → CorsLayer → TraceLayer → track_metrics
-    → cache_middleware (miss: passes through, strips Range header)
+    → cache_middleware (miss: strips Range header)
       → auth_middleware (HMAC-SHA256 verify)
         → streamingpath_handler
-            storage.get(params_hash) hit? → Body::from(bytes) with Content-Length
+            result_storage.get(params_hash) hit? → Body::from(bytes) with Content-Length
             ↓ miss
           Storage.get (source) OR fetch_audio_buffer (remote HTTP)
           ↓
-          Processor.process_streaming
-            Semaphore.acquire_owned → spawn_blocking → FFmpeg pipeline
+          Processor.process
+            Semaphore.acquire → spawn_blocking → FFmpeg pipeline
             → PipelineContext (decoder + encoder + filter graph)
-            → StreamingOutputContext (AVIOContext → SyncSender<Bytes>)
-            → bridge spawn_blocking (std::mpsc → tokio::mpsc)
-            → Stream<Item = Result<Bytes>>
+            → OutputContext (in-memory WriteBuffer → Vec<u8>)
+            → AudioBuffer
           ↓
-          tee task: fan-out to HTTP channel + storage collector channel
-          ↓                              ↓
-    Body::from_stream (chunked)     tokio::spawn: collect → storage.put(params_hash)
+          cache_middleware: axum::body::to_bytes(response, usize::MAX) → cache.set (bg)
           ↓
-    Transfer-Encoding: chunked response (first bytes in ~3ms)
+          result_storage.put (bg tokio::spawn)
+          ↓
+    Body::from(bytes) with Content-Length
+```
+
+### Cache miss — first request (streaming pipeline via `/stream/{*streamingpath}`)
+```
+HTTP Request
+  → CorsLayer → TraceLayer → track_metrics
+    → auth_middleware (HMAC-SHA256 verify)
+      → stream_handler
+          result_storage.get(params_hash) hit? → Body::from(bytes) with Content-Length
+          ↓ miss
+        Storage.get (source) OR fetch_audio_buffer (remote HTTP)
+        ↓
+        Processor.process_streaming
+          Semaphore.acquire_owned → spawn_blocking → FFmpeg pipeline
+          → PipelineContext (decoder + encoder + filter graph)
+          → StreamingOutputContext (AVIOContext → SyncSender<Bytes>)
+          → bridge spawn_blocking (std::mpsc → tokio::mpsc)
+          → Stream<Item = Result<Bytes>>
+        ↓
+        tee task: fan-out to HTTP channel + storage collector channel
+        ↓                              ↓
+  Body::from_stream (chunked)     tokio::spawn: collect → storage.put(params_hash)
+        ↓
+  Transfer-Encoding: chunked response (first bytes in ~3ms)
 ```
 
 ### Subsequent requests (result storage hit)
 ```
-HTTP Request → ... → streamingpath_handler
-  storage.get(params_hash) hit → Body::from(bytes) with Content-Length + Accept-Ranges
+HTTP Request → ... → streamingpath_handler / stream_handler
+  result_storage.get(params_hash) hit → Body::from(bytes) with Content-Length + Accept-Ranges
 ```
 
 ### Storage Backends
-- **FileStorage** — local filesystem
-- **S3Storage** — AWS S3 / MinIO
+- **FileStorage** — local filesystem, native streaming via `ReaderStream`
+- **S3Storage** — AWS S3 / MinIO, streaming via `ByteStream::into_async_read`
 - **GCloudStorage** — Google Cloud Storage
-- **CachedStorage** — wraps S3/GCS with a local disk cache
+- **CachedStorage** — wraps S3/GCS with a local disk LRU cache and streaming tee-on-miss
 
 ### Cache Backends
-- **RedisCache** — Redis with TTL
+- **RedisCache** — Redis with TTL via `MultiplexedConnection`
 - **FileSystemCache** — local filesystem with `.meta` expiry files
 
 ---
@@ -58,58 +81,70 @@ HTTP Request → ... → streamingpath_handler
 The core processing pipeline (`crates/ffmpeg`) uses direct FFI into libavcodec/libavformat/libavfilter — zero fork/exec overhead, in-memory I/O via custom `AVIOContext` callbacks, no temp files on the hot path. This is the single best architectural decision in the project.
 
 ### 2. Concurrency-Limited Processing via Semaphore
-`Processor` gates FFmpeg work through a `tokio::sync::Semaphore` sized to `num_cpus`. This prevents oversubscription — critical since FFmpeg decode/encode is CPU-bound. `spawn_blocking` is correctly used so the tokio runtime isn't starved. The semaphore permit is now held as an `OwnedSemaphorePermit` for the full lifetime of the FFmpeg `spawn_blocking` task, including the streaming case.
+`Processor` gates FFmpeg work through a `tokio::sync::Semaphore` sized to `num_cpus`. This prevents oversubscription — critical since FFmpeg decode/encode is CPU-bound. `spawn_blocking` is correctly used so the tokio runtime isn't starved. The semaphore permit is held as an `OwnedSemaphorePermit` for the full lifetime of the FFmpeg `spawn_blocking` task, including the streaming case.
 
 ### 3. Passthrough Short-Circuit
-`is_passthrough_request()` returns `input.clone()` (which is cheap — it's a `Bytes` refcount bump) when no processing is needed. Avoids the entire FFmpeg pipeline for identity requests. In streaming mode, this short-circuits to a single-item `futures::stream::once` stream.
+`is_passthrough_request()` returns `input.clone()` (which is cheap — it's a `Bytes` refcount bump) when no processing is needed. Avoids the entire FFmpeg pipeline for identity requests. The streaming endpoint extends this to a zero-buffer file streaming passthrough via `storage.get_stream()`, avoiding any in-memory buffering of the source file.
 
 ### 4. Multi-Tier Caching
-- **Result storage** (`storage.put(params_hash)`) — the primary cache. Checked first in `streamingpath_handler`; on hit, serves with `Content-Length` and `Accept-Ranges` support. Written in a background `tokio::spawn` task as the stream drains, so it doesn't block the response.
-- **Source cache** (`CachedStorage`) — avoids re-downloading from S3/GCS on repeated fetches of the same source file.
-- **Response cache** (Redis/filesystem) in `cache_middleware` — checked on every request; hit path unchanged and still returns buffered responses with range support.
+- **Result storage** (`storage.put(params_hash)`) — the primary cache. Checked first in `streamingpath_handler` and `stream_handler`; on hit, serves with `Content-Length`. Written in a background `tokio::spawn` task so it doesn't block the response.
+- **Source cache** (`CachedStorage`) — avoids re-downloading from S3/GCS on repeated fetches of the same source file. Includes streaming tee-on-miss for the `get_stream` path.
+- **Response cache** (Redis/filesystem) in `cache_middleware` — checked on every buffered request; hit path returns with range support.
 
 ### 5. Lean Docker Image
-Multi-stage build with `cargo-chef` for layer caching, static FFmpeg with only required filters/codecs. Runtime image is minimal `bookworm-slim`.
+Multi-stage build with `cargo-chef` for layer caching, static FFmpeg compiled with only required filters/codecs (23 explicit `--enable-filter` flags, everything else disabled). Runtime image is minimal `bookworm-slim` with only `openssl`, `ca-certificates`, and `curl`.
 
 ### 6. Robust Observability & Structured Logging
-The project uses `tracing` with a Bunyan formatter, providing structured JSON logs and `#[instrument]` spans across the hot path. It also integrates a Prometheus metrics recorder (`metrics-exporter-prometheus`) for real-time monitoring of request latency and throughput.
+The project uses `tracing` with Bunyan formatter for structured JSON logs and `#[instrument]` spans across the hot path. Prometheus metrics recorder exposes `http_requests_total` and `http_requests_duration_seconds` histogram with exponential buckets. `track_metrics` middleware captures method/path/status labels.
 
 ### 7. Zero-Copy Data Passing
-By leveraging the `bytes` crate, the engine passes audio data through the request lifecycle (fetch → process → respond) using atomic reference counting. Clones of `AudioBuffer` (and the underlying `Bytes` struct) are O(1) pointer bumps rather than O(N) memory copies, significantly reducing pressure on the CPU's memory controller during high-throughput scenarios.
+By leveraging the `bytes` crate, the engine passes audio data through the request lifecycle (fetch → process → respond) using atomic reference counting. Clones of `AudioBuffer` (and the underlying `Bytes` struct) are O(1) pointer bumps rather than O(N) memory copies.
 
 ### 8. Clean Storage & Provider Abstractions
-The `AudioStorage` trait allows the engine to swap between Local Filesystem, S3, and GCS with zero changes to the core routing logic. This decoupling is a hallmark of good systems design, allowing for easy transitions from single-server dev to cloud-scale production.
+The `AudioStorage` trait with `get_stream` default method allows the engine to swap between Local Filesystem, S3, and GCS with zero changes to the core routing logic, and enables progressive adoption of streaming I/O.
 
 ### 9. Streaming FFmpeg Output Pipeline
-On first-request cache misses, encoded audio now streams directly from FFmpeg to the HTTP response via a channel-backed `AVIOContext`. The implementation:
+On first-request cache misses via `/stream/`, encoded audio streams directly from FFmpeg to the HTTP response via a channel-backed `AVIOContext`. Key properties:
+- `StreamingOutputContext` sends each 32 KB AVIO buffer as a `Bytes` chunk through `SyncSender` with built-in backpressure.
+- `process_audio_streaming` bridges sync FFmpeg to async Tokio via `std::mpsc` → `tokio::mpsc`.
+- The tee task fans each chunk to both the HTTP body and a storage collector.
+- **197× reduction in TTFB.** Peak memory per request drops from O(file size × 3) to O(chunk buffer), roughly 8 × 32 KB = 256 KB in flight regardless of file size.
 
-- `StreamingOutputContext` (`crates/ffmpeg/src/io.rs`) — a new RAII `AVIOContext` whose `write_callback` sends each 32 KB AVIO buffer as a `Bytes` chunk to a bounded `std::sync::mpsc::SyncSender`. Backpressure is built in: FFmpeg blocks on `send()` if the consumer is slower than the encoder.
-- `OutputWrite` trait (`crates/ffmpeg/src/io.rs`) — shared interface over `OutputContext` (buffered) and `StreamingOutputContext`, allowing the pipeline logic to be written once in `run_to_output(&mut dyn OutputWrite)`.
-- `PipelineContext` (`crates/ffmpeg/src/pipeline.rs`) — packages decoder, encoder, filter graph, and resampler setup. `process()` and `process_streaming()` both call `setup_pipeline()` then `run_to_output()` against their respective output context.
-- `process_audio_streaming` (`src/processor/ffmpeg.rs`) — bridges the sync FFmpeg world to async Tokio: one `spawn_blocking` task runs FFmpeg (holding the semaphore permit), a second `spawn_blocking` bridge drains the `std::mpsc` channel into a `tokio::mpsc` channel, and the caller receives a `Stream<Item = Result<Bytes>>`.
-- Tee in `streamingpath_handler` (`src/routes/streamingpath.rs`) — a `tokio::spawn` task fans each chunk out to both the HTTP `Body::from_stream()` and a storage collector channel. When the stream ends, the collector assembles chunks and calls `storage.put()`.
-- `cache_middleware` (`src/middleware.rs`) — miss path simplified: no longer buffers the response body with `to_bytes()`. Passes through directly; `result_storage` is the persistence layer.
+### 10. Streaming Passthrough with Direct File I/O
+The `/stream/` endpoint detects passthrough cases by format extension and uses `storage.get_stream()` to pipe file chunks directly to the HTTP response without ever loading the entire file into memory. `FileStorage` uses `tokio_util::io::ReaderStream` and S3Storage uses `ByteStream::into_async_read()`, both zero-buffer streaming paths.
 
-**197× reduction in time to first byte.** Peak memory per request drops from O(file size × 3) — input buffer + FFmpeg output buffer + HTTP body buffer all live simultaneously — to O(chunk buffer), roughly 8 × 32 KB = 256 KB in flight regardless of file size. This is not measurable with divan; observe it with `heaptrack` or by watching RSS under concurrent load.
-
-**Limitations of the current streaming implementation:**
-- Output formats that seek during writing (`wav`, `m4a`) are not streaming-safe. The `channel_write_seek_callback` returns `-1` for all seeks, which causes FFmpeg to skip the seek silently for most muxers, but WAV and MP4 will produce malformed output if the seek is needed to finalize headers. Restrict streaming to `mp3` and `ogg` formats.
-- The `areverse` filter and two-pass `loudnorm` require the full buffer and are fundamentally non-streaming. They continue to work correctly (FFmpeg will produce the output regardless), but TTFB will match the buffered path for those filter combinations.
-- Streaming responses use `Transfer-Encoding: chunked` without `Content-Length`. Range requests (`Accept-Ranges`) are only supported on the result-storage hit path (second and subsequent requests), where the full buffer is available.
-- Mid-stream FFmpeg errors cause a truncated response rather than a well-formed HTTP error. The bridge detects channel closure but cannot inject an error frame into an already-started chunked body.
+### 11. Correct `spawn_blocking` Placement for CPU-Intensive Work
+All CPU-heavy operations — FFmpeg processing, PCM decode for thumbnails, thumbnail analysis, metadata extraction — are correctly dispatched via `tokio::task::spawn_blocking`, keeping the async executor unblocked.
 
 ---
 
 ## What It Does Poorly ❌
 
-### 1. **HIGH: Pathological Disk I/O in Cache Eviction (`FileSystemCache`)**
-In `src/cache/fs.rs`, every single time a cache entry is written (`FileSystemCache::set`), it calls `evict_notify.notify_one()`. This immediately wakes up `run_eviction`, which performs a full `tokio_fs::read_dir` scan and invokes `metadata()` on *every single file* in the cache directory to calculate total size. As the cache grows to thousands of files, this O(N) operation runs constantly, eventually pegging disk I/O at 100%.
+### 1. **HIGH: Pathological Disk I/O in Cache Eviction (`FileSystemCache` and `CachedStorage`)**
+Both `FileSystemCache::set` and `CachedStorage::write_to_cache` trigger `evict_notify.notify_one()` after every write. This wakes `run_eviction`, which performs a full `tokio_fs::read_dir` scan calling `metadata()` on every file in the cache directory. Both `run_eviction` implementations are O(N) where N is the number of cached files.
 
-### 2. **MEDIUM: Extraneous Allocations in Request Parsing**
-Hot path components like `Params::to_string()` and `suffix_result_storage_hasher` allocate heavily (`format!`, `to_string()`, `flat_map`, `collect::<Vec<_>>().join("&")`). This introduces unnecessary allocator pressure during high throughput spikes.
+This is duplicated identically across `src/cache/fs.rs` and `src/storage/cached.rs` — two separate eviction systems with the same O(N) anti-pattern.
 
-### 3. **LOW: `Params` Parsing Double-Computes Hash**
-`cache_middleware` and `streamingpath_handler` both call `suffix_result_storage_hasher(&params)`, which serializes `Params` to string and SHA1-hashes it — computed twice on every cache miss.
+### 2. **HIGH: `AudioProcessor::new()` is Constructed Per-Pipeline in Streaming Path**
+In `process_audio_streaming` (line 228), `ffmpeg::AudioProcessor::new()` is called inside every `spawn_blocking` invocation. While `AudioProcessor::new()` currently only calls `crate::init()` (which is behind a `Once`), the comment on the struct says "allows future extension (e.g., thread pool, reusable contexts)". More importantly, this means every request creates and drops a new `PipelineContext` with its own `FilterGraph`, `CodecContext`, and `Resampler` — the FFmpeg allocation/initialization cost is paid on every single request with no pooling or reuse.
+
+### 3. **MEDIUM: `Params` Hash Computed Twice on Cache Miss (Buffered Path)**
+Both `cache_middleware` (line 27) and `streamingpath_handler` (line 22) call `suffix_result_storage_hasher(&params)`, which serializes `Params` to string and SHA1-hashes it. On a cache miss through the buffered path, this is two full serialization + hash cycles for the same input.
+
+### 4. **MEDIUM: S3Storage `put` Clones Entire Audio Buffer**
+In `s3.rs:52`, `blob.as_ref().to_vec()` copies the entire audio payload into a new `Vec<u8>` to create a `ByteStream`. This is an O(N) allocation for every result storage write. Since puts happen in a background task, this blocks the storage task rather than the response, but it doubles peak memory.
+
+### 5. **MEDIUM: Thumbnail SSM is O(N²) Memory and Compute**
+`build_ssm` allocates a full `num_frames × num_frames` matrix. For a 10-minute track at 2 frames/sec, that's 1200 frames → 1.44M f32 entries (~5.5 MB). For a 60-minute track: 7200 frames → 51.8M entries (~200 MB). The `find_best_segment` search then does O(N² × L) work over this matrix with only a coarse stride to limit iterations.
+
+### 6. **MEDIUM: `meta_handler` Processes Audio Before Extracting Metadata**
+`meta_handler` (meta.rs:43) calls `state.processor.process(&blob, &params)` — running the full FFmpeg encode pipeline — before extracting metadata. For a metadata-only request with no filter params, this re-encodes the audio unnecessarily. The passthrough short-circuit inside `process_audio` helps when no params are set, but if *any* param (even `format`) is present, the full pipeline runs.
+
+### 7. **LOW: No Request Deduplication (Thundering Herd)**
+If 100 concurrent requests arrive for the same uncached audio with the same params, all 100 will independently: check cache (miss), fetch source, acquire semaphore permits, run FFmpeg, and write to result storage. The semaphore limits concurrency to `num_cpus`, so most will queue, but they all still execute independently. There is no coalescing of in-flight identical work.
+
+### 8. **LOW: `WriteBuffer` Never Pre-Allocates**
+The FFmpeg output `WriteBuffer` (`io.rs:60`) starts as an empty `Vec<u8>` with `Vec::new()`. For a typical 3-5 MB MP3 output, this will reallocate ~20 times as it grows (doubling strategy). Pre-allocating based on input size (e.g., `input_size / 2` as a heuristic for compressed output) would eliminate these reallocations.
 
 ---
 
@@ -117,8 +152,25 @@ Hot path components like `Params::to_string()` and `suffix_result_storage_hasher
 
 | Priority | Fix | Effort | Impact | Status |
 |----------|-----|--------|--------|--------|
-| **P1** | **Refactor `FileSystemCache` eviction logic** to use a running `AtomicU64` size counter or an in-memory LRU tracking system (`moka`) instead of `read_dir` scans on every write | Medium | Fixes disk I/O pegging | |
-| **P2** | **Optimize hot path strings** using `std::fmt::Write` over pre-allocated buffers in `Params::to_string()` and `hasher.rs` to eliminate transient `Vec` allocations | Small | Lowers allocator pressure | |
-| **P3** | Thread the computed `params_hash` through the request extensions so it is computed once per request instead of twice | Small | Minor CPU save | |
-| **P4** | **Streaming-safe WAV/M4A output** — use fragmented MP4 (`-movflags frag_keyframe+empty_moov`) and WAV header post-patch to extend streaming to all output formats | Medium | Removes format restriction on TTFB improvement | |
-| **P5** | **Stream source input into FFmpeg** — replace the full-buffer `InputContext` with a `mmap`-backed or chunked-read AVIO source for local files, eliminating the source read allocation | Medium | Eliminates remaining O(N) input allocation | |
+| **P1** | **Refactor `FileSystemCache` and `CachedStorage` eviction** to use a running `AtomicU64` size counter or an in-memory LRU tracker (`moka`) instead of `read_dir` scans on every write. Deduplicate the two identical eviction implementations into a shared utility. | Medium | Fixes disk I/O pegging under load | |
+| **P2** | **Add request coalescing** (e.g., `tokio::sync::watch` or a `DashMap<ParamsHash, Shared<JoinHandle>>`) so concurrent identical requests share a single processing pipeline | Medium | Eliminates thundering herd, reduces CPU waste by `N-1` for duplicate requests | |
+| **P4** | **Fix S3 `put` to avoid copying** — use `Bytes::into()` or `ByteStream::from(bytes::Bytes)` instead of `.as_ref().to_vec()` to avoid the O(N) allocation | Small | Halves peak memory for S3 result storage writes | |
+| **P5** | **Pre-allocate `WriteBuffer`** — estimate output size from input size and format (e.g., MP3 at 192kbps ≈ `duration_sec * 24000` bytes) and call `Vec::with_capacity` | Small | Eliminates ~20 reallocs per encode | |
+| **P6** | **Optimize `meta_handler`** — skip `processor.process()` when params contain no filters/transforms and extract metadata directly from the source blob | Small | Avoids a full FFmpeg encode for metadata-only requests | |
+| **P7** | **Cap SSM size for thumbnails** — downsample chroma frames or use a band-diagonal SSM when `num_frames > threshold` (e.g., 2000) to bound memory at O(N×W) instead of O(N²) | Medium | Prevents OOM on long tracks | |
+| **P8** | **Streaming-safe WAV/M4A output** — use fragmented MP4 (`-movflags frag_keyframe+empty_moov`) and WAV header post-patch to extend streaming to all output formats | Medium | Removes format restriction on TTFB improvement | |
+| **P9** | **Stream source input into FFmpeg** — replace the full-buffer `InputContext` with a `mmap`-backed or chunked-read AVIO source for local files, eliminating the remaining O(N) input allocation | Hard | Eliminates last O(N) allocation in the pipeline | |
+
+---
+
+## Appendix: Streaming Pipeline Limitations
+
+Documented limitations of the current `/stream/` streaming implementation:
+
+1. **Format restrictions** — Output formats that seek during writing (`wav`, `m4a`) are not streaming-safe. The `channel_write_seek_callback` returns `-1` for all seeks, which causes FFmpeg to skip the seek silently for most muxers, but WAV and MP4 will produce malformed output. Restrict streaming to `mp3`, `ogg`, and `opus` formats.
+
+2. **Non-streaming filters** — `areverse` and two-pass `loudnorm` require the full buffer and are fundamentally non-streaming. They work correctly, but TTFB will match the buffered path for those filter combinations.
+
+3. **No `Content-Length` on first request** — Streaming responses use `Transfer-Encoding: chunked` without `Content-Length`. Range requests (`Accept-Ranges`) are only supported on the result-storage hit path (second and subsequent requests).
+
+4. **Truncated error responses** — Mid-stream FFmpeg errors cause a truncated response rather than a well-formed HTTP error. The bridge detects channel closure but cannot inject an error frame into an already-started chunked body.

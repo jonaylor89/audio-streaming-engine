@@ -1,3 +1,4 @@
+use crate::cache::AudioCache;
 use crate::state::AppStateDyn;
 use crate::streamingpath::hasher::{suffix_result_storage_hasher, verify_hash};
 use crate::streamingpath::params::Params;
@@ -11,11 +12,31 @@ use axum::{
     response::IntoResponse,
 };
 use color_eyre::eyre::eyre;
+use std::sync::Arc;
 use tracing::{debug, warn};
 
 const CACHE_KEY_PREFIX: &str = "req_cache:";
 const META_CACHE_KEY_PREFIX: &str = "meta_cache:";
 const THUMB_CACHE_KEY_PREFIX: &str = "thumb_cache:";
+
+/// Inserted into request extensions on a cache miss so downstream handlers can
+/// populate the response cache without the middleware needing to buffer the body.
+#[derive(Clone)]
+pub struct CacheMissContext {
+    pub cache: Arc<dyn AudioCache>,
+    pub cache_key: String,
+}
+
+impl CacheMissContext {
+    /// Write bytes to the response cache in a background task.
+    pub fn populate(self, data: Bytes) {
+        tokio::spawn(async move {
+            if let Err(e) = self.cache.set(&self.cache_key, &data, None).await {
+                warn!("Failed to write response to cache [{}]: {}", &self.cache_key, e);
+            }
+        });
+    }
+}
 
 #[tracing::instrument(skip(state, req, next))]
 pub async fn cache_middleware(
@@ -25,7 +46,6 @@ pub async fn cache_middleware(
     next: Next,
 ) -> Result<impl IntoResponse, AppError> {
     let params_hash = suffix_result_storage_hasher(&params);
-    let request_headers = req.headers().clone();
 
     let uri_path = req.uri().path();
     let cache_key_prefix = if uri_path.starts_with("/meta") {
@@ -45,6 +65,7 @@ pub async fn cache_middleware(
         .await
         .map_err(|e| e500(eyre!("Failed to get cache: {}", e)))?;
     if let Some(buf) = cache_response {
+        let request_headers = req.headers().clone();
         let content_type = infer::get(&buf)
             .map(|mime| mime.to_string())
             .unwrap_or("audio/mpeg".to_string());
@@ -52,32 +73,14 @@ pub async fn cache_middleware(
         return build_audio_response(&request_headers, &content_type, Bytes::from(buf));
     }
 
-    // Cache MISS: strip Range (we need the full body to cache it), run the handler,
-    // buffer the response, write to cache in background, then serve with range support.
-    req.headers_mut().remove(header::RANGE);
-    let response = next.run(req).await;
-
-    let content_type = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("audio/mpeg")
-        .to_string();
-
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .map_err(|e| e500(eyre!("Failed to buffer response body: {}", e)))?;
-
-    let bg_cache = state.cache.clone();
-    let bg_key = cache_key;
-    let bg_bytes = body_bytes.clone();
-    tokio::spawn(async move {
-        if let Err(e) = bg_cache.set(&bg_key, &bg_bytes, None).await {
-            warn!("Failed to write response to cache [{}]: {}", &bg_key, e);
-        }
+    // Cache MISS: pass through to the handler. The handler will populate the
+    // cache via CacheMissContext — no body buffering needed in the middleware.
+    req.extensions_mut().insert(CacheMissContext {
+        cache: state.cache.clone(),
+        cache_key,
     });
 
-    build_audio_response(&request_headers, &content_type, body_bytes)
+    Ok(next.run(req).await)
 }
 
 pub async fn auth_middleware(
