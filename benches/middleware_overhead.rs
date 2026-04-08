@@ -101,12 +101,11 @@ mod old_middleware_miss {
             .with_inputs(|| {
                 // Simulate handler returning Body::from(bytes)
                 let bytes = make_body(size);
-                let response = Response::builder()
+                Response::builder()
                     .header(header::CONTENT_TYPE, "audio/mpeg")
                     .header(header::CONTENT_LENGTH, bytes.len().to_string())
                     .body(Body::from(bytes))
-                    .unwrap();
-                response
+                    .unwrap()
             })
             .bench_values(|response| {
                 rt.block_on(async {
@@ -131,12 +130,11 @@ mod new_middleware_miss {
         bencher
             .with_inputs(|| {
                 let bytes = make_body(size);
-                let response = Response::builder()
+                Response::builder()
                     .header(header::CONTENT_TYPE, "audio/mpeg")
                     .header(header::CONTENT_LENGTH, bytes.len().to_string())
                     .body(Body::from(bytes))
-                    .unwrap();
-                response
+                    .unwrap()
             })
             .bench_values(|response| {
                 // New path: middleware just returns the response.

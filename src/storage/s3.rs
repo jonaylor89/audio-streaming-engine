@@ -38,7 +38,7 @@ impl AudioStorage for S3Storage {
             .await?;
 
         let data = output.body.collect().await?.into_bytes();
-        Ok(AudioBuffer::from_bytes(data.to_vec()))
+        Ok(AudioBuffer::from_bytes(data))
     }
 
     #[tracing::instrument(skip(self, blob))]
@@ -49,7 +49,7 @@ impl AudioStorage for S3Storage {
             .put_object()
             .bucket(&self.bucket)
             .key(full_path)
-            .body(ByteStream::from(blob.as_ref().to_vec()))
+            .body(ByteStream::from(blob.bytes()))
             .send()
             .await?;
 

@@ -74,7 +74,7 @@ fn build_bin_chroma_map(fft_size: usize, sample_rate: i32) -> Vec<Option<usize>>
     let half = fft_size / 2;
     let mut map = vec![None; half];
 
-    for bin in 1..half {
+    for (bin, chroma_slot) in map.iter_mut().enumerate().take(half).skip(1) {
         let freq = bin as f64 * sample_rate as f64 / fft_size as f64;
         if !(32.0..=8000.0).contains(&freq) {
             continue;
@@ -83,7 +83,7 @@ fn build_bin_chroma_map(fft_size: usize, sample_rate: i32) -> Vec<Option<usize>>
         // Convert frequency to MIDI note number, then to chroma
         let midi = 69.0 + 12.0 * (freq / 440.0).log2();
         let chroma_bin = ((midi.round() as i32) % 12).unsigned_abs() as usize;
-        map[bin] = Some(chroma_bin % NUM_CHROMA);
+        *chroma_slot = Some(chroma_bin % NUM_CHROMA);
     }
 
     map

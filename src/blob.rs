@@ -181,6 +181,10 @@ impl AudioBuffer {
         self.data.is_empty()
     }
 
+    pub fn bytes(&self) -> Bytes {
+        self.data.clone()
+    }
+
     pub fn into_bytes(self) -> Bytes {
         self.data
     }

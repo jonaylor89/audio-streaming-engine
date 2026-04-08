@@ -1,5 +1,5 @@
 use crate::helpers::{load_fixture_bytes, load_fixture_pcm};
-use streaming_engine::blob::{AudioBuffer, AudioFormat};
+use streaming_engine::blob::AudioBuffer;
 use streaming_engine::processor::{AudioProcessor, Processor};
 use streaming_engine::streamingpath::params::Params;
 use streaming_engine::thumbnail::{ThumbnailConfig, analyze, chroma, ssm};

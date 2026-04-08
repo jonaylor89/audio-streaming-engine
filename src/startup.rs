@@ -1,10 +1,10 @@
-use crate::cache::{AudioCache, Cache};
+use crate::cache::Cache;
 use crate::config::{Settings, StorageClient, StorageSettings};
 use crate::inflight::InflightTracker;
 use crate::metrics::{setup_metrics_recorder, track_metrics};
 use crate::middleware::auth_middleware;
 use crate::middleware::cache_middleware;
-use crate::processor::{AudioProcessor, Processor};
+use crate::processor::Processor;
 use crate::routes::health::health_check;
 use crate::routes::list::list_handler;
 use crate::routes::meta::meta_handler;
@@ -31,7 +31,6 @@ use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, eyre};
 #[cfg(feature = "s3")]
 use secrecy::ExposeSecret;
-use secrecy::SecretString;
 use std::future::ready;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -105,17 +104,24 @@ impl Application {
             storage.clone()
         };
 
-        let server = run(
-            listener,
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .expect("Failed to build HTTP client");
+
+        let state = AppStateDyn {
             storage,
             result_storage,
-            processor,
-            cache,
-            web_ui,
+            processor: Arc::new(processor),
+            cache: Arc::new(cache),
+            http_client,
             web_config,
-            config.application.hmac_secret.clone(),
-        )
-        .await?;
+            hmac_secret: config.application.hmac_secret.clone(),
+            inflight: Arc::new(InflightTracker::new()),
+        };
+
+        let server = run(listener, state).await?;
 
         Ok(Self { port, server })
     }
@@ -215,38 +221,12 @@ async fn build_storage(settings: StorageSettings) -> Result<Arc<dyn AudioStorage
     }
 }
 
-async fn run<P, C>(
+async fn run(
     listener: TcpListener,
-    storage: Arc<dyn AudioStorage>,
-    result_storage: Arc<dyn AudioStorage>,
-    processor: P,
-    cache: C,
-    web_ui: bool,
-    web_config: Option<WebConfig>,
-    hmac_secret: SecretString,
-) -> Result<Serve<TcpListener, Router, Router>>
-where
-    P: AudioProcessor + Send + Sync + 'static,
-    C: AudioCache + Clone + Send + Sync + 'static,
-{
+    state: AppStateDyn,
+) -> Result<Serve<TcpListener, Router, Router>> {
     let recorder_handle = setup_metrics_recorder();
-
-    let http_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .connect_timeout(Duration::from_secs(10))
-        .build()
-        .expect("Failed to build HTTP client");
-
-    let state = AppStateDyn {
-        storage,
-        result_storage,
-        processor: Arc::new(processor),
-        cache: Arc::new(cache.clone()),
-        http_client,
-        web_config,
-        hmac_secret,
-        inflight: Arc::new(InflightTracker::new()),
-    };
+    let web_ui = state.web_config.is_some();
 
     let mut app = Router::new()
         .route("/health", get(health_check))

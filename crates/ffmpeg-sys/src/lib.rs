@@ -8,6 +8,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::all)]
 #![allow(dead_code)]
+#![allow(unnecessary_transmutes)]
 
 mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));

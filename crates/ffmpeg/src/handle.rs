@@ -1,4 +1,7 @@
 //! RAII wrappers for FFmpeg resources.
+//!
+//! Many methods here form the public API surface but aren't called yet.
+#![allow(dead_code)]
 
 use crate::error::{check, FfmpegError};
 use ffmpeg_sys::*;

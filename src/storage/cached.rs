@@ -1,14 +1,13 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use color_eyre::Result;
 use tokio::fs;
-use tokio::sync::Notify;
 use tracing::{debug, warn};
 
 use crate::blob::AudioBuffer;
 use crate::config::LocalCacheSettings;
+use crate::disk_evictor::DiskEvictor;
 use crate::storage::AudioStorage;
 use crate::storage::backend::ByteStream;
 
@@ -16,33 +15,41 @@ use crate::storage::backend::ByteStream;
 pub struct CachedStorage<S> {
     inner: S,
     cache_dir: PathBuf,
-    evict_notify: Arc<Notify>,
+    evictor: DiskEvictor,
 }
 
 impl<S: AudioStorage + Clone + Send + Sync + 'static> CachedStorage<S> {
     pub fn new(inner: S, settings: &LocalCacheSettings) -> Self {
         let cache_dir = PathBuf::from(&settings.base_dir);
         let max_size_bytes = settings.max_size_mb * 1024 * 1024;
-        let evict_notify = Arc::new(Notify::new());
-
-        // Spawn background eviction task
-        let bg_dir = cache_dir.clone();
-        let bg_max = max_size_bytes;
-        let bg_notify = evict_notify.clone();
-        tokio::spawn(async move {
-            loop {
-                bg_notify.notified().await;
-                if let Err(e) = run_eviction(&bg_dir, bg_max).await {
-                    warn!(error = %e, "background eviction failed");
-                }
-            }
-        });
+        let evictor = DiskEvictor::new(cache_dir.clone(), max_size_bytes, None);
 
         Self {
             inner,
             cache_dir,
-            evict_notify,
+            evictor,
         }
+    }
+
+    /// Build a `CachedStorage` with a **manual** evictor (no background task).
+    /// Tests can call `evictor().scan()` / `evictor().evict()` explicitly.
+    #[cfg(test)]
+    pub fn new_manual(inner: S, settings: &LocalCacheSettings) -> Self {
+        let cache_dir = PathBuf::from(&settings.base_dir);
+        let max_size_bytes = settings.max_size_mb * 1024 * 1024;
+        let evictor = DiskEvictor::manual(cache_dir.clone(), max_size_bytes, None);
+
+        Self {
+            inner,
+            cache_dir,
+            evictor,
+        }
+    }
+
+    /// Returns a reference to the inner evictor (for test assertions).
+    #[cfg(test)]
+    pub fn evictor(&self) -> &DiskEvictor {
+        &self.evictor
     }
 
     fn cache_path(&self, key: &str) -> PathBuf {
@@ -70,55 +77,14 @@ impl<S: AudioStorage + Clone + Send + Sync + 'static> CachedStorage<S> {
             return;
         }
 
-        if let Err(e) = fs::write(&path, blob.as_ref()).await {
+        let data = blob.as_ref();
+        if let Err(e) = fs::write(&path, data).await {
             warn!(key, error = %e, "failed to write to local cache");
         } else {
             debug!(key, "cached source blob locally");
-        }
-
-        // Signal background eviction (non-blocking)
-        self.evict_notify.notify_one();
-    }
-}
-
-async fn run_eviction(cache_dir: &PathBuf, max_size_bytes: u64) -> Result<()> {
-    if !cache_dir.exists() {
-        return Ok(());
-    }
-
-    let mut entries = Vec::new();
-    let mut total_size: u64 = 0;
-    let mut dir = fs::read_dir(cache_dir).await?;
-    while let Some(entry) = dir.next_entry().await? {
-        if let Ok(meta) = entry.metadata().await
-            && meta.is_file()
-        {
-            let size = meta.len();
-            let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            total_size += size;
-            entries.push((entry.path(), size, modified));
+            self.evictor.track_write(data.len() as u64);
         }
     }
-
-    if total_size <= max_size_bytes {
-        return Ok(());
-    }
-
-    // Evict oldest first
-    entries.sort_by_key(|(_, _, modified)| *modified);
-    for (path, size, _) in &entries {
-        if total_size <= max_size_bytes {
-            break;
-        }
-        debug!(path = %path.display(), "evicting cached source blob");
-        if let Err(e) = fs::remove_file(path).await {
-            warn!(path = %path.display(), error = %e, "failed to evict cached file");
-        } else {
-            total_size -= size;
-        }
-    }
-
-    Ok(())
 }
 
 #[async_trait]
@@ -149,7 +115,7 @@ impl<S: AudioStorage + Clone + Send + Sync + 'static> AudioStorage for CachedSto
         let inner_stream = self.inner.get_stream(key).await?;
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes>>(8);
         let bg_cache_path = cache_path;
-        let bg_notify = self.evict_notify.clone();
+        let bg_evictor = self.evictor.clone();
 
         // Tee task: forward chunks to the HTTP consumer channel and collect for caching
         tokio::spawn(async move {
@@ -177,11 +143,12 @@ impl<S: AudioStorage + Clone + Send + Sync + 'static> AudioStorage for CachedSto
                 if let Some(parent) = bg_cache_path.parent() {
                     let _ = fs::create_dir_all(parent).await;
                 }
+                let len = cache_buf.len() as u64;
                 if let Err(e) = fs::write(&bg_cache_path, &cache_buf).await {
                     warn!(error = %e, "failed to write stream to local cache");
                 } else {
                     debug!("cached streamed source blob locally");
-                    bg_notify.notify_one();
+                    bg_evictor.track_write(len);
                 }
             }
         });
@@ -196,9 +163,13 @@ impl<S: AudioStorage + Clone + Send + Sync + 'static> AudioStorage for CachedSto
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        // Remove from local cache too
         let cache_path = self.cache_path(key);
-        let _ = fs::remove_file(cache_path).await;
+        let size = fs::metadata(&cache_path).await.map(|m| m.len()).ok();
+        if fs::remove_file(&cache_path).await.is_ok()
+            && let Some(s) = size
+        {
+            self.evictor.track_delete(s);
+        }
         self.inner.delete(key).await
     }
 
@@ -236,8 +207,9 @@ mod tests {
         }
     }
 
+    /// Second fetch for the same key returns cached data without hitting inner.
     #[tokio::test]
-    async fn test_cache_hit_avoids_inner_fetch() {
+    async fn cache_hit_avoids_inner_fetch() {
         let temp = tempdir().unwrap();
         let mock = MockStorage {
             fetch_count: std::sync::Arc::new(AtomicU32::new(0)),
@@ -246,57 +218,45 @@ mod tests {
             base_dir: temp.path().to_str().unwrap().to_string(),
             max_size_mb: 100,
         };
-        let cached = CachedStorage::new(mock.clone(), &settings);
+        let cached = CachedStorage::new_manual(mock.clone(), &settings);
 
-        // First fetch should hit inner
         let _ = cached.get("test.mp3").await.unwrap();
         assert_eq!(mock.fetch_count.load(Ordering::SeqCst), 1);
 
-        // Second fetch should come from local cache
         let _ = cached.get("test.mp3").await.unwrap();
         assert_eq!(mock.fetch_count.load(Ordering::SeqCst), 1);
     }
 
+    /// Manual eviction with max_size=0 removes all cached files.
     #[tokio::test]
-    async fn test_eviction_respects_max_size() {
+    async fn eviction_respects_max_size() {
         let temp = tempdir().unwrap();
         let mock = MockStorage {
             fetch_count: std::sync::Arc::new(AtomicU32::new(0)),
         };
-        // 1 byte max — forces eviction on every write
         let settings = LocalCacheSettings {
             base_dir: temp.path().to_str().unwrap().to_string(),
             max_size_mb: 0,
         };
-        let cached = CachedStorage::new(mock, &settings);
+        let cached = CachedStorage::new_manual(mock, &settings);
 
         let _ = cached.get("a.mp3").await.unwrap();
         let _ = cached.get("b.mp3").await.unwrap();
 
-        // Poll until the background eviction task has run. The single
-        // `yield_now` that was here before was not enough — the eviction
-        // task needs to wake, read the directory, and delete files, which
-        // may take more than one scheduler tick under load.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            let mut count = 0u32;
-            let mut dir = fs::read_dir(temp.path()).await.unwrap();
-            while dir.next_entry().await.unwrap().is_some() {
-                count += 1;
-            }
-            if count <= 1 {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "eviction did not reduce cache to <= 1 file within 2 s (found {count})"
-            );
-        }
+        // Deterministic: scan + evict, no polling needed.
+        cached.evictor().evict().await.unwrap();
+
+        let count = std::fs::read_dir(temp.path()).unwrap().count();
+        assert!(
+            count <= 1,
+            "expected at most 1 file after eviction, found {count}"
+        );
     }
 
+    /// Deleting a key removes it from the local cache so the next get
+    /// hits inner again.
     #[tokio::test]
-    async fn test_delete_removes_from_cache() {
+    async fn delete_removes_from_cache() {
         let temp = tempdir().unwrap();
         let mock = MockStorage {
             fetch_count: std::sync::Arc::new(AtomicU32::new(0)),
@@ -305,17 +265,35 @@ mod tests {
             base_dir: temp.path().to_str().unwrap().to_string(),
             max_size_mb: 100,
         };
-        let cached = CachedStorage::new(mock.clone(), &settings);
+        let cached = CachedStorage::new_manual(mock.clone(), &settings);
 
-        // Populate cache
         let _ = cached.get("test.mp3").await.unwrap();
         assert_eq!(mock.fetch_count.load(Ordering::SeqCst), 1);
 
-        // Delete should remove from cache
         let _ = cached.delete("test.mp3").await;
 
-        // Next get should hit inner again
         let _ = cached.get("test.mp3").await.unwrap();
         assert_eq!(mock.fetch_count.load(Ordering::SeqCst), 2);
+    }
+
+    /// The evictor counter stays in sync with what CachedStorage writes and
+    /// deletes, without any background task.
+    #[tokio::test]
+    async fn evictor_counter_tracks_writes_and_deletes() {
+        let temp = tempdir().unwrap();
+        let mock = MockStorage {
+            fetch_count: std::sync::Arc::new(AtomicU32::new(0)),
+        };
+        let settings = LocalCacheSettings {
+            base_dir: temp.path().to_str().unwrap().to_string(),
+            max_size_mb: 100,
+        };
+        let cached = CachedStorage::new_manual(mock, &settings);
+
+        let _ = cached.get("x.mp3").await.unwrap();
+        assert_eq!(cached.evictor().current_bytes(), 4); // 4-byte mock payload
+
+        let _ = cached.delete("x.mp3").await;
+        assert_eq!(cached.evictor().current_bytes(), 0);
     }
 }

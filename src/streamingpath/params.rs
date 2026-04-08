@@ -1437,7 +1437,7 @@ mod tests {
         println!("Encoded URL length: {} characters", encoded_url.len());
 
         // Calculate the difference safely
-        let url_diff = if traditional_url.len() > encoded_url.len() {
+        let _url_diff = if traditional_url.len() > encoded_url.len() {
             println!(
                 "Space saved: {} characters ({:.1}%)",
                 traditional_url.len() - encoded_url.len(),

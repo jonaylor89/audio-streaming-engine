@@ -147,28 +147,18 @@ All CPU-heavy operations — FFmpeg processing, PCM decode for thumbnails, thumb
 
 ## What It Does Poorly ❌
 
-### 1. **HIGH: Pathological Disk I/O in Cache Eviction (`FileSystemCache` and `CachedStorage`)**
-Both `FileSystemCache::set` and `CachedStorage::write_to_cache` trigger `evict_notify.notify_one()` after every write. This wakes `run_eviction`, which performs a full `tokio_fs::read_dir` scan calling `metadata()` on every file in the cache directory. Both `run_eviction` implementations are O(N) where N is the number of cached files.
-
-This is duplicated identically across `src/cache/fs.rs` and `src/storage/cached.rs` — two separate eviction systems with the same O(N) anti-pattern.
-
-### 2. **MEDIUM: S3Storage `put` Clones Entire Audio Buffer**
-In `s3.rs:52`, `blob.as_ref().to_vec()` copies the entire audio payload into a new `Vec<u8>` to create a `ByteStream`. This is an O(N) allocation for every result storage write. Since puts happen in a background task, this blocks the storage task rather than the response, but it doubles peak memory for the duration of the S3 upload.
-
-### 3. **MEDIUM: Thumbnail SSM is O(N²) Memory and Compute**
+### 1. **MEDIUM: Thumbnail SSM is O(N²) Memory and Compute**
 `build_ssm` allocates a full `num_frames × num_frames` matrix. For a 10-minute track at 2 frames/sec, that's 1200 frames → 1.44M f32 entries (~5.5 MB). For a 60-minute track: 7200 frames → 51.8M entries (~200 MB). The `find_best_segment` search then does O(N² × L) work over this matrix with only a coarse stride to limit iterations.
 
-### 4. **MEDIUM: `meta_handler` Processes Audio Before Extracting Metadata**
+### 2. **MEDIUM: `meta_handler` Processes Audio Before Extracting Metadata**
 `meta_handler` (meta.rs:46) calls `state.processor.process(&blob, &params)` — running the full FFmpeg encode pipeline — before extracting metadata. For a metadata-only request with no filter params, this re-encodes the audio unnecessarily. The passthrough short-circuit inside `process_audio` helps when no params are set, but if *any* param (even `format`) is present, the full pipeline runs just to extract metadata from the output.
 
-### 5. **MEDIUM: Thumbnail Pipeline Has No Request Coalescing**
+### 3. **MEDIUM: Thumbnail Pipeline Has No Request Coalescing**
 The `/thumbnail/` endpoint does not participate in the `InflightTracker` coalescing that protects the main `streamingpath_handler`. If N concurrent requests arrive for the same thumbnail, all N will independently decode PCM, run the SSM analysis, and process the audio. Only the result storage check at the top provides protection after the first request completes.
 
-### 6. **LOW: Remote Audio Fetch Has No Streaming Support**
+### 4. **LOW: Remote Audio Fetch Has No Streaming Support**
 `fetch_audio_buffer` (remote.rs:33) calls `response.bytes().await`, which buffers the entire remote response into memory. For large remote files (up to the 256 MB limit), this is a significant memory spike. The streaming pipeline via `/stream/` currently falls back to this full-buffer fetch for remote URLs, negating the TTFB benefit.
 
-### 7. **LOW: S3Storage `get` Clones Entire Response**
-In `s3.rs:41`, `data.to_vec()` copies the S3 response body into a new `Vec<u8>` to create an `AudioBuffer`. The `Bytes` from `collect().await?.into_bytes()` could potentially be passed directly into `AudioBuffer::from_bytes()` without the `to_vec()` conversion.
 
 ---
 
@@ -176,13 +166,11 @@ In `s3.rs:41`, `data.to_vec()` copies the S3 response body into a new `Vec<u8>` 
 
 | Priority | Fix | Effort | Impact |
 |----------|-----|--------|--------|
-| **P1** | **Refactor `FileSystemCache` and `CachedStorage` eviction** to use a running `AtomicU64` size counter or an in-memory LRU tracker (`moka`) instead of `read_dir` scans on every write. Deduplicate the two identical eviction implementations into a shared utility. | Medium | Fixes disk I/O pegging under load |
-| **P2** | **Add coalescing to thumbnail endpoint** — reuse `InflightTracker` (with the `_thumb` suffixed hash) so concurrent identical thumbnail requests share a single PCM decode + analysis + process pipeline | Small | Eliminates redundant CPU-heavy work for popular tracks |
-| **P3** | **Fix S3 `put` to avoid copying** — use `Bytes::into()` or `ByteStream::from(bytes::Bytes)` instead of `.as_ref().to_vec()` to avoid the O(N) allocation. Same for `get` — pass `into_bytes()` directly to `AudioBuffer::from_bytes()` | Small | Halves peak memory for S3 storage operations |
-| **P4** | **Optimize `meta_handler`** — skip `processor.process()` when params contain no filters/transforms and extract metadata directly from the source blob | Small | Avoids a full FFmpeg encode for metadata-only requests |
-| **P5** | **Cap SSM size for thumbnails** — downsample chroma frames or use a band-diagonal SSM when `num_frames > threshold` (e.g., 2000) to bound memory at O(N×W) instead of O(N²) | Medium | Prevents OOM on long tracks |
-| **P6** | **Stream remote audio fetches** — use `response.bytes_stream()` to pipe remote content into the streaming pipeline instead of buffering the entire response in memory | Medium | Reduces memory spike for large remote files |
-| **P7** | **Streaming-safe WAV/M4A output** — use fragmented MP4 (`-movflags frag_keyframe+empty_moov`) and WAV header post-patch to extend streaming to all output formats | Medium | Removes format restriction on TTFB improvement |
+| **P1** | **Add coalescing to thumbnail endpoint** — reuse `InflightTracker` (with the `_thumb` suffixed hash) so concurrent identical thumbnail requests share a single PCM decode + analysis + process pipeline | Small | Eliminates redundant CPU-heavy work for popular tracks |
+| **P2** | **Optimize `meta_handler`** — skip `processor.process()` when params contain no filters/transforms and extract metadata directly from the source blob | Small | Avoids a full FFmpeg encode for metadata-only requests |
+| **P3** | **Cap SSM size for thumbnails** — downsample chroma frames or use a band-diagonal SSM when `num_frames > threshold` (e.g., 2000) to bound memory at O(N×W) instead of O(N²) | Medium | Prevents OOM on long tracks |
+| **P4** | **Stream remote audio fetches** — use `response.bytes_stream()` to pipe remote content into the streaming pipeline instead of buffering the entire response in memory | Medium | Reduces memory spike for large remote files |
+| **P5** | **Streaming-safe WAV/M4A output** — use fragmented MP4 (`-movflags frag_keyframe+empty_moov`) and WAV header post-patch to extend streaming to all output formats | Medium | Removes format restriction on TTFB improvement |
 
 ---
 

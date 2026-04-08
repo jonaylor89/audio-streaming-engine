@@ -1,3 +1,4 @@
+pub mod disk_evictor;
 pub mod health_check;
 pub mod helpers;
 pub mod pcm_decode;

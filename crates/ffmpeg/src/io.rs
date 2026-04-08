@@ -1,4 +1,5 @@
 //! Custom I/O for in-memory audio processing.
+#![allow(dead_code, clippy::useless_transmute, clippy::unnecessary_cast)]
 
 use crate::error::{check, FfmpegError};
 use ffmpeg_sys::*;
