@@ -31,6 +31,11 @@ where
 
     #[tracing::instrument(skip(parts, _state))]
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        // Re-use Params already parsed by an upstream middleware (e.g. cache_middleware).
+        if let Some(cached) = parts.extensions.remove::<Params>() {
+            return Ok(cached);
+        }
+
         // Access the URI and perform your custom parsing logic
         let uri = &parts.uri;
         let path = strip_route_prefix(uri.path());

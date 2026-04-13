@@ -3,6 +3,7 @@ pub mod disk_evictor;
 pub mod file_storage;
 pub mod health_check;
 pub mod helpers;
+pub mod params_caching;
 pub mod pcm_decode;
 pub mod range_requests;
 pub mod request_coalescing;

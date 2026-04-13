@@ -83,6 +83,9 @@ pub async fn cache_middleware(
         cache_key,
     });
 
+    // Store the already-parsed Params so downstream handlers skip re-parsing.
+    req.extensions_mut().insert(params);
+
     Ok(next.run(req).await)
 }
 
