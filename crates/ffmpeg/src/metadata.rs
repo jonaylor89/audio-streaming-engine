@@ -24,10 +24,11 @@ pub struct AudioFileMetadata {
 ///
 /// This opens the data with FFmpeg's demuxer, reads format-level and
 /// stream-level information, and returns it as an [`AudioFileMetadata`].
-pub fn extract_metadata(data: &[u8]) -> Result<AudioFileMetadata, FfmpegError> {
+pub fn extract_metadata(data: bytes::Bytes) -> Result<AudioFileMetadata, FfmpegError> {
     crate::init();
 
-    let input = InputContext::open(bytes::Bytes::copy_from_slice(data))?;
+    let data_len = data.len();
+    let input = InputContext::open(data)?;
     let format_ctx = input.format_ctx();
 
     // Format name from AVInputFormat
@@ -101,7 +102,7 @@ pub fn extract_metadata(data: &[u8]) -> Result<AudioFileMetadata, FfmpegError> {
         (None, None, None)
     };
 
-    let size = Some(data.len() as i64);
+    let size = Some(data_len as i64);
 
     Ok(AudioFileMetadata {
         format,

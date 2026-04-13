@@ -48,8 +48,8 @@ pub async fn meta_handler(
         e500(eyre!("Failed to process audio: {}", e))
     })?;
 
-    let audio_data = processed_blob.as_ref().to_vec();
-    let file_meta = tokio::task::spawn_blocking(move || ffmpeg::extract_metadata(&audio_data))
+    let audio_data = processed_blob.bytes();
+    let file_meta = tokio::task::spawn_blocking(move || ffmpeg::extract_metadata(audio_data))
         .await
         .map_err(|e| {
             tracing::error!("Metadata extraction task panicked: {}", e);
