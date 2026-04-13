@@ -1,3 +1,4 @@
+pub mod cache_bytes;
 pub mod disk_evictor;
 pub mod file_storage;
 pub mod health_check;

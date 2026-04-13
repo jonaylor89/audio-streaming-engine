@@ -1,5 +1,6 @@
 use super::AudioCache;
 use async_trait::async_trait;
+use bytes::Bytes;
 use color_eyre::Result;
 use redis::AsyncCommands;
 use redis::Client;
@@ -21,17 +22,17 @@ impl RedisCache {
 
 #[async_trait]
 impl AudioCache for RedisCache {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &str) -> Result<Option<Bytes>> {
         let mut conn = self.conn.clone();
         let data: Option<Vec<u8>> = conn.get(key).await?;
-        Ok(data)
+        Ok(data.map(Bytes::from))
     }
 
-    async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<()> {
+    async fn set(&self, key: &str, value: Bytes, ttl: Option<Duration>) -> Result<()> {
         let mut conn = self.conn.clone();
         let res = match ttl {
-            Some(duration) => conn.set_ex(key, value, duration.as_secs()).await,
-            None => conn.set(key, value).await,
+            Some(duration) => conn.set_ex(key, value.as_ref(), duration.as_secs()).await,
+            None => conn.set(key, value.as_ref()).await,
         };
 
         res.map_err(Into::into)

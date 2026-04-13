@@ -31,7 +31,7 @@ impl CacheMissContext {
     /// Write bytes to the response cache in a background task.
     pub fn populate(self, data: Bytes) {
         tokio::spawn(async move {
-            if let Err(e) = self.cache.set(&self.cache_key, &data, None).await {
+            if let Err(e) = self.cache.set(&self.cache_key, data, None).await {
                 warn!(
                     "Failed to write response to cache [{}]: {}",
                     &self.cache_key, e
@@ -73,7 +73,7 @@ pub async fn cache_middleware(
             .map(|mime| mime.to_string())
             .unwrap_or("audio/mpeg".to_string());
         debug!("Cache hit key={}", cache_key);
-        return build_audio_response(&request_headers, &content_type, Bytes::from(buf));
+        return build_audio_response(&request_headers, &content_type, buf);
     }
 
     // Cache MISS: pass through to the handler. The handler will populate the

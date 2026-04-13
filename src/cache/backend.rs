@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use bytes::Bytes;
 use color_eyre::Result;
 use std::time::Duration;
 
@@ -29,21 +30,21 @@ impl Cache {
 
 #[async_trait]
 pub trait AudioCache: Send + Sync {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
-    async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<()>;
+    async fn get(&self, key: &str) -> Result<Option<Bytes>>;
+    async fn set(&self, key: &str, value: Bytes, ttl: Option<Duration>) -> Result<()>;
     async fn delete(&self, key: &str) -> Result<()>;
 }
 
 #[async_trait]
 impl AudioCache for Cache {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &str) -> Result<Option<Bytes>> {
         match self {
             Cache::Redis(cache) => cache.get(key).await,
             Cache::Filesystem(cache) => cache.get(key).await,
         }
     }
 
-    async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<()> {
+    async fn set(&self, key: &str, value: Bytes, ttl: Option<Duration>) -> Result<()> {
         match self {
             Cache::Redis(cache) => cache.set(key, value, ttl).await,
             Cache::Filesystem(cache) => cache.set(key, value, ttl).await,

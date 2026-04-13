@@ -1,6 +1,7 @@
 use super::AudioCache;
 use crate::disk_evictor::DiskEvictor;
 use async_trait::async_trait;
+use bytes::Bytes;
 use color_eyre::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -53,7 +54,7 @@ impl FileSystemCache {
 
 #[async_trait]
 impl AudioCache for FileSystemCache {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &str) -> Result<Option<Bytes>> {
         let file_path = self.get_file_path(key);
 
         if !file_path.exists() {
@@ -73,16 +74,16 @@ impl AudioCache for FileSystemCache {
         }
 
         let contents = tokio_fs::read(&file_path).await?;
-        Ok(Some(contents))
+        Ok(Some(Bytes::from(contents)))
     }
 
-    async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<()> {
+    async fn set(&self, key: &str, value: Bytes, ttl: Option<Duration>) -> Result<()> {
         let file_path = self.get_file_path(key);
 
         // Check existing size before overwriting
         let old_size = tokio_fs::metadata(&file_path).await.map(|m| m.len()).ok();
 
-        tokio_fs::write(&file_path, value).await?;
+        tokio_fs::write(&file_path, &value).await?;
 
         if let Some(duration) = ttl {
             let meta_path = self.get_meta_path(key);
