@@ -1,5 +1,7 @@
 # Performance Audit: Audio Streaming Engine
 
+*Last updated: 2026-04-13*
+
 ## Architecture Overview
 
 ### Cache hit (no processing)
@@ -138,10 +140,16 @@ The `/stream/` endpoint detects passthrough cases by format extension and uses `
 All CPU-heavy operations — FFmpeg processing, PCM decode for thumbnails, thumbnail analysis, metadata extraction — are correctly dispatched via `tokio::task::spawn_blocking`, keeping the async executor unblocked.
 
 ### 14. Allocation-Free Params Hashing
-`hash_params` uses a `Sha1Writer` adapter that implements `fmt::Write` to feed `Params::write_hash_input` directly into the SHA-1 state machine. This avoids allocating an intermediate `String` representation of the params — the hash is computed in a single streaming pass.
+`hash_params` uses a `Sha1Writer` adapter that implements `fmt::Write` to feed `Params::write_hash_input` directly into the SHA-1 state machine. This avoids allocating an intermediate `String` representation of the params — the hash is computed in a single streaming pass. Additionally, `write_hash_input` uses `itoa` and `ryu` for zero-allocation integer/float formatting.
 
 ### 15. Output Buffer Pre-Allocation
 `OutputContext::open_with_capacity` pre-allocates the `WriteBuffer`'s backing `Vec<u8>` with a size hint of `input_size / 2`, avoiding repeated reallocations during encoding. This is a small but meaningful optimization for large files.
+
+### 16. DiskEvictor with Running Size Counter
+The `DiskEvictor` maintains an `AtomicU64` running byte counter updated via `track_write` / `track_delete`. This avoids scanning the directory on every cache write to check whether eviction is needed. Full directory scans only happen at startup and during actual eviction passes. The background task sleeps on a `Notify` and only wakes when the counter exceeds the limit — zero polling overhead.
+
+### 17. Correct Waiter-Promotion in Coalescing
+When a leader panics or is cancelled without setting a result, waiters do not hang — the `Drop` impl on `InflightGuard` calls `notify_waiters()`, and the waiter loop detects `None` in the result mutex and retries leader election. The `remove_if` with `Arc::ptr_eq` prevents a successor from clobbering a new entry for the same key.
 
 ---
 
@@ -159,6 +167,26 @@ The `/thumbnail/` endpoint does not participate in the `InflightTracker` coalesc
 ### 4. **LOW: Remote Audio Fetch Has No Streaming Support**
 `fetch_audio_buffer` (remote.rs:33) calls `response.bytes().await`, which buffers the entire remote response into memory. For large remote files (up to the 256 MB limit), this is a significant memory spike. The streaming pipeline via `/stream/` currently falls back to this full-buffer fetch for remote URLs, negating the TTFB benefit.
 
+### 5. **LOW: `AudioCache::get` Returns `Vec<u8>`, Not `Bytes`**
+The `AudioCache` trait's `get` method returns `Option<Vec<u8>>` (cache/backend.rs:32). In `cache_middleware`, this `Vec<u8>` is immediately wrapped in `Bytes::from(buf)` (middleware.rs:76), which is zero-copy (takes ownership of the `Vec` heap). However, the `FileSystemCache::get` (fs.rs:75) reads the file into a `Vec<u8>` via `tokio_fs::read`, which is fine — but the `RedisCache::get` deserializes into `Vec<u8>`, then the middleware clones into `Bytes`. The real issue is that `AudioCache::set` takes `&[u8]`, forcing the caller to hold the data in memory for the duration of the write. Changing the trait to accept `Bytes` would let cache population hand off ownership and avoid pinning large buffers in the caller.
+
+### 6. **LOW: `FileStorage::get` Reads Entire File into `Vec<u8>`**
+`FileStorage::get` (file.rs:30-33) uses `file.read_to_end(&mut buffer)`, allocating a `Vec<u8>` that grows dynamically. It doesn't pre-size the buffer using file metadata (`File::metadata().await?.len()`), so a large file triggers multiple reallocations as the `Vec` grows. For a 50 MB file this could mean 3-4 reallocs with memcpy of the growing buffer.
+
+### 7. **LOW: Streaming `/stream/` Endpoint Has No Request Coalescing**
+Unlike the buffered `/{*streamingpath}` endpoint which uses `InflightTracker`, the streaming `/stream/` endpoint has no coalescing. Concurrent requests for the same uncached params each independently fetch the source and run the FFmpeg pipeline. The streaming nature makes coalescing harder (you can't share a stream between consumers), but the work duplication is still wasteful.
+
+### 8. **LOW: `chroma::extract_chroma` Allocates a New `FftPlanner` Per Call**
+In `thumbnail/chroma.rs:15`, each call to `extract_chroma` creates a fresh `FftPlanner::<f32>::new()`. The planner internally caches computed FFT plans, but that cache is per-instance. Since the thumbnail pipeline creates a new planner for every request, the planner cache provides no benefit. For a 4096-point FFT this is a minor cost (microseconds), but it's a missed optimization.
+
+### 9. **LOW: `sniff_content_type` Is Duplicated Across Handlers**
+The `sniff_content_type` function is copy-pasted in `routes/streamingpath.rs` and `routes/thumbnail.rs`. While not a runtime performance issue, it indicates the absence of a centralized `ContentType` detection path that could be optimized once (e.g., cached per params hash).
+
+### 10. **INFO: No Connection Pooling Configuration for Redis**
+`RedisCache::new` creates a single `MultiplexedConnection`. The `redis` crate's `MultiplexedConnection` is a single TCP connection multiplexed across tasks, which is efficient. However, there's no reconnection logic or connection pool — if the Redis connection drops, all cache operations fail until the server is restarted. This isn't a throughput issue (multiplexed connections handle high concurrency well) but affects resilience.
+
+### 11. **INFO: `Params` Is Parsed Twice on Buffered Requests**
+On the buffered path (`/{*streamingpath}`), `Params` is extracted via `FromRequestParts` in both `cache_middleware` and `streamingpath_handler`. The Axum extractor parses the URI and query params each time. Since `Params` implements `Clone`, the first parse could be stored in request extensions and reused. This is ~microseconds per request and unlikely to matter, but it's an unnecessary repeated parse.
 
 ---
 
@@ -169,8 +197,11 @@ The `/thumbnail/` endpoint does not participate in the `InflightTracker` coalesc
 | **P1** | **Add coalescing to thumbnail endpoint** — reuse `InflightTracker` (with the `_thumb` suffixed hash) so concurrent identical thumbnail requests share a single PCM decode + analysis + process pipeline | Small | Eliminates redundant CPU-heavy work for popular tracks |
 | **P2** | **Optimize `meta_handler`** — skip `processor.process()` when params contain no filters/transforms and extract metadata directly from the source blob | Small | Avoids a full FFmpeg encode for metadata-only requests |
 | **P3** | **Cap SSM size for thumbnails** — downsample chroma frames or use a band-diagonal SSM when `num_frames > threshold` (e.g., 2000) to bound memory at O(N×W) instead of O(N²) | Medium | Prevents OOM on long tracks |
-| **P4** | **Stream remote audio fetches** — use `response.bytes_stream()` to pipe remote content into the streaming pipeline instead of buffering the entire response in memory | Medium | Reduces memory spike for large remote files |
-| **P5** | **Streaming-safe WAV/M4A output** — use fragmented MP4 (`-movflags frag_keyframe+empty_moov`) and WAV header post-patch to extend streaming to all output formats | Medium | Removes format restriction on TTFB improvement |
+| **P4** | **Pre-size `FileStorage::get` buffer** — call `file.metadata().await?.len()` and `Vec::with_capacity` to avoid reallocs on large files | Small | Eliminates 3-4 memcpys per large file read |
+| **P5** | **Stream remote audio fetches** — use `response.bytes_stream()` to pipe remote content into the streaming pipeline instead of buffering the entire response in memory | Medium | Reduces memory spike for large remote files |
+| **P6** | **Change `AudioCache` trait to use `Bytes`** — `get` returns `Option<Bytes>`, `set` takes `Bytes` — avoids unnecessary `Vec<u8>` ↔ `Bytes` conversions and lets cache population transfer ownership | Small | Cleaner data flow, avoids pinning buffers |
+| **P7** | **Cache `Params` in request extensions** — parse once in `cache_middleware`, store in extensions, reuse in handler | Small | Eliminates redundant URI parsing on buffered path |
+| **P8** | **Streaming-safe WAV/M4A output** — use fragmented MP4 (`-movflags frag_keyframe+empty_moov`) and WAV header post-patch to extend streaming to all output formats | Medium | Removes format restriction on TTFB improvement |
 
 ---
 
@@ -187,3 +218,17 @@ Documented limitations of the current `/stream/` streaming implementation:
 4. **Truncated error responses** — Mid-stream FFmpeg errors cause a truncated response rather than a well-formed HTTP error. The bridge detects channel closure but cannot inject an error frame into an already-started chunked body.
 
 5. **No streaming for remote sources** — Remote URLs are always fully buffered via `fetch_audio_buffer` before processing, even on the `/stream/` endpoint. The streaming TTFB benefit only applies to local/S3/GCS storage sources.
+
+## Appendix: Memory Profile by Request Type
+
+| Request Type | Peak Memory per Request | Notes |
+|---|---|---|
+| Cache hit (Redis) | ~size of cached response | Redis returns `Vec<u8>`, converted to `Bytes` |
+| Cache hit (FS) | ~size of cached file | File read into `Vec<u8>` |
+| Buffered miss (small file) | ~3× file size | source `Bytes` + FFmpeg working set + output `Vec<u8>` |
+| Buffered miss (large file) | ~3× file size | Same, but problematic at 100 MB+ |
+| Streaming miss (local) | ~256 KB + source `Bytes` | Channel backpressure limits in-flight chunks |
+| Streaming passthrough | ~256 KB | Never loads full file; `ReaderStream` chunks |
+| Thumbnail (10 min track) | ~source + 5.5 MB SSM + PCM | SSM dominates for long tracks |
+| Thumbnail (60 min track) | ~source + 200 MB SSM + PCM | **OOM risk** |
+| Remote fetch | ~256 MB max | `response.bytes()` buffers entire body |

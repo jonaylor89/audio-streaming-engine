@@ -27,8 +27,9 @@ impl AudioStorage for FileStorage {
             debug!("full path {}", p);
         }
 
-        let mut file = File::open(full_path).await?;
-        let mut buffer = Vec::new();
+        let mut file = File::open(&full_path).await?;
+        let meta = file.metadata().await?;
+        let mut buffer = Vec::with_capacity(meta.len() as usize);
         file.read_to_end(&mut buffer).await?;
         Ok(AudioBuffer::from_bytes(buffer))
     }
