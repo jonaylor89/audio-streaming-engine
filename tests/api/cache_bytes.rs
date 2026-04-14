@@ -1,8 +1,8 @@
 //! Tests for the `AudioCache` trait using `Bytes` instead of `Vec<u8>`.
 
 use bytes::Bytes;
-use streaming_engine::cache::fs::FileSystemCache;
 use streaming_engine::cache::AudioCache;
+use streaming_engine::cache::fs::FileSystemCache;
 
 /// `FileSystemCache` round-trips `Bytes` through `set` and `get` without
 /// unnecessary copies. The returned `Bytes` must equal the original value,

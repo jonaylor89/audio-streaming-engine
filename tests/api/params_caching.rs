@@ -19,10 +19,7 @@ async fn buffered_request_reuses_cached_params() {
     // inserted into extensions, then consumed by streamingpath_handler.
     let response = app
         .api_client
-        .get(&format!(
-            "{}/unsafe/sample1.mp3?volume=0.5",
-            &app.address
-        ))
+        .get(&format!("{}/unsafe/sample1.mp3?volume=0.5", &app.address))
         .send()
         .await
         .expect("Failed to execute request");
@@ -47,10 +44,7 @@ async fn buffered_request_reuses_cached_params() {
     // but never inserted (early return). Confirms no regression on hit path.
     let response2 = app
         .api_client
-        .get(&format!(
-            "{}/unsafe/sample1.mp3?volume=0.5",
-            &app.address
-        ))
+        .get(&format!("{}/unsafe/sample1.mp3?volume=0.5", &app.address))
         .send()
         .await
         .expect("Failed to execute second request");
