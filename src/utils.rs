@@ -53,6 +53,13 @@ where
     AppError::new(e.into(), StatusCode::NOT_FOUND)
 }
 
+pub fn e413<T>(e: T) -> AppError
+where
+    T: Into<eyre::Error>,
+{
+    AppError::new(e.into(), StatusCode::PAYLOAD_TOO_LARGE)
+}
+
 pub fn e416<T>(e: T) -> AppError
 where
     T: Into<eyre::Error>,

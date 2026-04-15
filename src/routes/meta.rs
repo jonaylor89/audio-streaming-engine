@@ -11,7 +11,7 @@ use crate::{
     remote::fetch_audio_buffer,
     state::AppStateDyn,
     streamingpath::params::Params,
-    utils::{AppError, e404, e500},
+    utils::{AppError, e404, e413, e500},
 };
 
 #[derive(Serialize, Deserialize, Debug, ToSchema)]
@@ -35,13 +35,21 @@ pub async fn meta_handler(
     info!("meta: {:?}", params);
 
     let blob = if params.key.starts_with("https://") || params.key.starts_with("http://") {
-        fetch_audio_buffer(&state.http_client, &params.key).await?
+        fetch_audio_buffer(&state.http_client, &params.key, state.max_source_size).await?
     } else {
         state.storage.get(&params.key).await.map_err(|e| {
             tracing::error!("Failed to fetch audio from storage {}: {}", params.key, e);
             e404(eyre!("Failed to fetch audio: {}", e))
         })?
     };
+
+    if blob.len() > state.max_source_size {
+        return Err(e413(eyre!(
+            "Source audio too large: {} bytes (max {})",
+            blob.len(),
+            state.max_source_size
+        )));
+    }
 
     let processed_blob = state.processor.process(&blob, &params).await.map_err(|e| {
         tracing::error!("Failed to process audio with params {:?}: {}", params, e);

@@ -16,7 +16,7 @@ use crate::{
     remote::fetch_audio_buffer,
     state::AppStateDyn,
     streamingpath::{hasher::suffix_result_storage_hasher, params::Params},
-    utils::{AppError, e404, e500},
+    utils::{AppError, e404, e413, e500},
 };
 
 /// Experimental streaming endpoint: processes audio via FFmpeg and streams chunks
@@ -130,13 +130,21 @@ pub async fn stream_handler(
 
     // Non-passthrough: fetch entire source into memory (FFmpeg needs seekable input)
     let blob = if is_remote {
-        fetch_audio_buffer(&state.http_client, &params.key).await?
+        fetch_audio_buffer(&state.http_client, &params.key, state.max_source_size).await?
     } else {
         state.storage.get(&params.key).await.map_err(|e| {
             tracing::error!("Failed to fetch audio from storage {}: {}", params.key, e);
             e404(eyre!("Failed to fetch audio: {}", e))
         })?
     };
+
+    if blob.len() > state.max_source_size {
+        return Err(e413(eyre!(
+            "Source audio too large: {} bytes (max {})",
+            blob.len(),
+            state.max_source_size
+        )));
+    }
 
     // Determine output MIME type before starting the stream
     let output_format = params.format.unwrap_or(blob.format());

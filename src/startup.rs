@@ -82,6 +82,7 @@ impl Application {
             None
         };
 
+        let max_source_size = config.processor.max_source_size;
         let processor = Processor::new(config.processor);
 
         if config.application.clear_on_startup {
@@ -119,6 +120,7 @@ impl Application {
             web_config,
             hmac_secret: config.application.hmac_secret.clone(),
             inflight: Arc::new(InflightTracker::new()),
+            max_source_size,
         };
 
         let server = run(listener, state).await?;

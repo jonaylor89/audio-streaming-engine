@@ -176,11 +176,11 @@ The `/thumbnail/` endpoint does not participate in the `InflightTracker` coalesc
 ### 4. **MEDIUM: `AudioProcessor` is Recreated Per Request**
 In `processor/ffmpeg.rs:168-169`, every call to `process_audio` creates a new `ffmpeg::AudioProcessor::new()` inside the `spawn_blocking` closure. While `AudioProcessor::new()` is cheap today (just calls `crate::init()` which is a no-op after the first call), the comment in `pipeline.rs:98-99` explicitly notes the struct "allows future extension (e.g., thread pool, reusable contexts)." More importantly, the per-request allocation pattern means the decoder, encoder, and filter graph contexts are built from scratch for every request — even when consecutive requests use the same codec pair. Pooling `PipelineContext` or at minimum caching FFmpeg codec lookups (`find_encoder_by_name`, `find_decoder`) would eliminate repeated FFmpeg internal hash table walks.
 
-### 5. **MEDIUM: `metadata::extract_metadata` Copies Input Data**
-In `metadata.rs:30`, `extract_metadata` takes `&[u8]` and calls `Bytes::copy_from_slice(data)`, creating a full copy of the audio data just to open an `InputContext`. The caller in `meta_handler` (meta.rs:51) already has a `Bytes` reference via `processed_blob.as_ref().to_vec()` — so the data is copied **twice**: once from `AudioBuffer` → `Vec<u8>`, then from `Vec<u8>` → `Bytes`. Changing `extract_metadata` to accept `Bytes` directly would eliminate both copies.
+### ~~5. **MEDIUM: `metadata::extract_metadata` Copies Input Data**~~ ✅ Already resolved
+`extract_metadata` already accepts `Bytes` directly, and `meta_handler` calls `processed_blob.bytes()` which is a zero-copy `Arc` bump. No double-copy exists.
 
-### 6. **MEDIUM: Streaming Bridge Uses Two `spawn_blocking` Tasks**
-In `process_audio_streaming` (processor/ffmpeg.rs:214-254), the streaming pipeline spawns **two** `spawn_blocking` tasks: one for the bridge (draining `std::mpsc` → `tokio::mpsc`) and one for FFmpeg processing. Each `spawn_blocking` task occupies a thread from Tokio's blocking thread pool. Under high concurrency (e.g., 50 simultaneous streaming requests), this doubles the blocking thread demand to 100 threads. The bridge task is purely I/O — draining a sync channel — and could instead be a regular `tokio::spawn` task that calls `try_recv` in a loop with `tokio::task::yield_now()`, or the sync channel could be replaced with a `tokio::sync::mpsc` with `blocking_send` from the FFmpeg thread.
+### ~~6. **MEDIUM: Streaming Bridge Uses Two `spawn_blocking` Tasks**~~ ✅ Resolved
+The bridge task in `process_audio_streaming` has been changed from `spawn_blocking` to `tokio::spawn` with a `try_recv` + `yield_now()` polling loop. Under high concurrency, this halves the blocking thread demand (only the FFmpeg task uses `spawn_blocking`).
 
 ### 7. **LOW: Remote Audio Fetch Has No Streaming Support**
 `fetch_audio_buffer` (remote.rs:33) calls `response.bytes().await`, which buffers the entire remote response into memory. For large remote files (up to the 256 MB limit), this is a significant memory spike. The streaming pipeline via `/stream/` currently falls back to this full-buffer fetch for remote URLs, negating the TTFB benefit.
@@ -206,8 +206,8 @@ Both the passthrough and FFmpeg streaming paths in `stream.rs` collect chunks in
 ### 14. **INFO: No Connection Pooling Configuration for Redis**
 `RedisCache::new` creates a single `MultiplexedConnection`. The `redis` crate's `MultiplexedConnection` is a single TCP connection multiplexed across tasks, which is efficient. However, there's no reconnection logic or connection pool — if the Redis connection drops, all cache operations fail until the server is restarted. This isn't a throughput issue (multiplexed connections handle high concurrency well) but affects resilience.
 
-### 15. **INFO: No Request Size Limits on Buffered Endpoint**
-The buffered `/{*streamingpath}` endpoint will load the entire source file into memory, process it via FFmpeg (which may expand the data), and hold the entire output in a `Vec<u8>`. Combined with the concurrency semaphore (defaulting to `num_cpus`), peak memory for the processing pipeline alone is `num_cpus × 3 × max_file_size`. There's no per-request memory budget or file-size limit enforced before the source is loaded. The `MAX_REMOTE_BODY_SIZE` (256 MB) only applies to remote fetches, not local/S3/GCS storage reads.
+### ~~15. **INFO: No Request Size Limits on Buffered Endpoint**~~ ✅ Resolved
+A configurable `max_source_size` (default 100 MB) is now enforced in all handlers — buffered, streaming, metadata, and thumbnail — before processing begins. The same limit is used for remote fetches (replacing the hardcoded `MAX_REMOTE_BODY_SIZE`). Oversized requests receive 413 Payload Too Large. Peak memory for the processing pipeline is now bounded to `num_cpus × 3 × max_source_size`. The limit is set via `processor.max_source_size` in config or the `APP_PROCESSOR__MAX_SOURCE_SIZE` env var.
 
 ### 16. **INFO: `S3Storage::list` Does Not Paginate**
 `S3Storage::list` calls `list_objects_v2` once without handling the `continuation_token`, so it returns at most 1000 keys. This is fine for the current `/list` web UI but would silently truncate results for larger buckets.
@@ -221,11 +221,11 @@ The buffered `/{*streamingpath}` endpoint will load the entire source file into 
 | **P1** | **Cap SSM size for thumbnails** — downsample chroma frames when `num_frames > threshold` (e.g., 2000), or use a band-diagonal SSM of width W to bound memory at O(N×W) instead of O(N²). Add an explicit `num_frames` ceiling to reject or truncate absurdly long inputs. | Medium | Prevents OOM on long tracks; closes a denial-of-service vector |
 | **P2** | **Add coalescing to thumbnail endpoint** — reuse `InflightTracker` (with the `_thumb` suffixed hash) so concurrent identical thumbnail requests share a single PCM decode + analysis + process pipeline | Small | Eliminates redundant CPU-heavy work for popular tracks |
 | **P3** | **Optimize `meta_handler`** — skip `processor.process()` when params contain no filters/transforms and extract metadata directly from the source blob | Small | Avoids a full FFmpeg encode for metadata-only requests |
-| **P4** | **Eliminate double-copy in metadata extraction** — change `extract_metadata` to accept `Bytes` instead of `&[u8]`, and pass `processed_blob.bytes()` directly from `meta_handler` instead of going through `.as_ref().to_vec()` | Small | Saves a full copy of the audio data per metadata request |
-| **P5** | **Reduce blocking thread pressure for streaming** — replace the bridge `spawn_blocking` task with a `tokio::spawn` that polls the `std::mpsc` receiver via `try_recv` + yield, or switch to a single `tokio::sync::mpsc` with `blocking_send` from the FFmpeg thread | Small | Halves blocking thread consumption under high streaming concurrency |
+| ~~P4~~ | ~~Eliminate double-copy in metadata extraction~~ | ✅ | Already resolved — `extract_metadata` accepts `Bytes` directly |
+| ~~P5~~ | ~~Reduce blocking thread pressure for streaming~~ | ✅ | Bridge task changed from `spawn_blocking` to `tokio::spawn` with `try_recv` + yield |
 | **P6** | **Stream remote audio fetches** — use `response.bytes_stream()` to pipe remote content into the streaming pipeline instead of buffering the entire response in memory | Medium | Reduces memory spike for large remote files |
 | **P7** | **Streaming-safe WAV/M4A output** — use fragmented MP4 (`-movflags frag_keyframe+empty_moov`) and WAV header post-patch to extend streaming to all output formats | Medium | Removes format restriction on TTFB improvement |
-| **P8** | **Add per-request file-size limits** — enforce a maximum source file size for the buffered pipeline (e.g., 100 MB) at the storage layer, returning 413 early. This bounds peak memory to `num_cpus × 3 × limit`. | Small | Prevents memory exhaustion from oversized inputs |
+| ~~P8~~ | ~~Add per-request file-size limits~~ | ✅ | `max_source_size` config (default 100 MB) enforced in all handlers; returns 413 early |
 
 ### Previously Recommended — Now Resolved ✅
 
@@ -234,6 +234,9 @@ The buffered `/{*streamingpath}` endpoint will load the entire source file into 
 | Pre-size `FileStorage::get` buffer via `file.metadata().len()` | ✅ Fixed: `file.rs:31-32` reads metadata and pre-allocates `Vec::with_capacity` |
 | Change `AudioCache` trait to use `Bytes` instead of `Vec<u8>` | ✅ Fixed: `backend.rs:33-34` — `get` returns `Option<Bytes>`, `set` takes `Bytes` |
 | Cache `Params` in request extensions to avoid double-parse | ✅ Fixed: `middleware.rs:87` inserts parsed `Params`; `params.rs:35-37` reuses from extensions |
+| Eliminate double-copy in `extract_metadata` | ✅ Already resolved: `extract_metadata` accepts `Bytes` directly; `meta_handler` passes `processed_blob.bytes()` (Arc bump) |
+| Reduce blocking thread pressure for streaming bridge | ✅ Fixed: bridge changed from `spawn_blocking` to `tokio::spawn` with `try_recv` + `yield_now()` |
+| Add per-request file-size limits | ✅ Fixed: `max_source_size` config (default 100 MB) enforced in all handlers with 413 response; replaces hardcoded `MAX_REMOTE_BODY_SIZE` |
 
 ---
 

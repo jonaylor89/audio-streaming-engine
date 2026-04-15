@@ -28,4 +28,5 @@ pub struct AppStateDyn {
     pub web_config: Option<WebConfig>,
     pub hmac_secret: SecretString,
     pub inflight: Arc<InflightTracker>,
+    pub max_source_size: usize,
 }

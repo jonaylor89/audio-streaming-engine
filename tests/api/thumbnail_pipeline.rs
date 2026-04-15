@@ -146,6 +146,7 @@ async fn processed_thumbnail_audio_is_not_silent() {
         max_cache_files: 1000,
         max_cache_mem: 100 * 1024 * 1024,
         max_cache_size: 1024 * 1024 * 1024,
+        ..Default::default()
     });
 
     let processed = processor.process(&blob, &params).await.unwrap();

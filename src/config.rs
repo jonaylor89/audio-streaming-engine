@@ -57,6 +57,16 @@ pub struct ProcessorSettings {
     pub max_cache_files: i32,
     pub max_cache_mem: i32,
     pub max_cache_size: i32,
+
+    /// Maximum source file size in bytes. Requests for files larger than this
+    /// are rejected with 413 Payload Too Large before any processing begins.
+    /// Defaults to 100 MB.
+    #[serde(default = "default_max_source_size")]
+    pub max_source_size: usize,
+}
+
+fn default_max_source_size() -> usize {
+    100 * 1024 * 1024 // 100 MB
 }
 
 #[derive(Deserialize, Clone, Default)]

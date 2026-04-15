@@ -5,14 +5,15 @@ use serde::Deserialize;
 use tracing::warn;
 
 use crate::blob::AudioBuffer;
-use crate::utils::{AppError, e400, e404, e500};
+use crate::utils::{AppError, e413, e404, e500};
 
 const AUDIOUS_API_BASE_URL: &str = "https://api.audius.co/v1";
 
-/// Maximum allowed response body size for remote audio fetches (256 MB).
-const MAX_REMOTE_BODY_SIZE: usize = 256 * 1024 * 1024;
-
-pub async fn fetch_audio_buffer(client: &Client, source: &str) -> Result<AudioBuffer, AppError> {
+pub async fn fetch_audio_buffer(
+    client: &Client,
+    source: &str,
+    max_source_size: usize,
+) -> Result<AudioBuffer, AppError> {
     let resolved = resolve_remote_source(client, source).await?;
 
     let response = client.get(&resolved).send().await.map_err(|e| {
@@ -21,12 +22,12 @@ pub async fn fetch_audio_buffer(client: &Client, source: &str) -> Result<AudioBu
     })?;
 
     if let Some(content_length) = response.content_length()
-        && content_length as usize > MAX_REMOTE_BODY_SIZE
+        && content_length as usize > max_source_size
     {
-        return Err(e400(eyre!(
+        return Err(e413(eyre!(
             "Remote audio too large: {} bytes (max {})",
             content_length,
-            MAX_REMOTE_BODY_SIZE
+            max_source_size
         )));
     }
 
@@ -35,11 +36,11 @@ pub async fn fetch_audio_buffer(client: &Client, source: &str) -> Result<AudioBu
         e500(eyre!("Failed to fetch audio: {}", e))
     })?;
 
-    if raw_bytes.len() > MAX_REMOTE_BODY_SIZE {
-        return Err(e400(eyre!(
+    if raw_bytes.len() > max_source_size {
+        return Err(e413(eyre!(
             "Remote audio too large: {} bytes (max {})",
             raw_bytes.len(),
-            MAX_REMOTE_BODY_SIZE
+            max_source_size
         )));
     }
 
