@@ -207,18 +207,30 @@ pub async fn process_audio_streaming(
     // HTTP consumer is slow, preventing unbounded buffering.
     let (std_tx, std_rx) = mpsc::sync_channel::<Bytes>(8);
 
-    // Bridge: drain the std::sync channel from a spawn_blocking task and forward
-    // to a tokio channel that the async stream can consume.
+    // Bridge: drain the std::sync channel and forward to a tokio channel that
+    // the async stream can consume. This is a lightweight async task — no
+    // blocking thread needed since we poll with try_recv.
     let (tokio_tx, tokio_rx) = tokio::sync::mpsc::channel::<Result<Bytes>>(8);
     let bridge_tx = tokio_tx;
-    tokio::task::spawn_blocking(move || {
-        while let Ok(chunk) = std_rx.recv() {
-            if bridge_tx.blocking_send(Ok(chunk)).is_err() {
-                // Receiver dropped (client disconnected) — stop bridge.
-                return;
+    tokio::spawn(async move {
+        loop {
+            match std_rx.try_recv() {
+                Ok(chunk) => {
+                    if bridge_tx.send(Ok(chunk)).await.is_err() {
+                        // Receiver dropped (client disconnected) — stop bridge.
+                        return;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Channel empty — yield briefly to avoid busy-spinning.
+                    tokio::task::yield_now().await;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // std_tx was dropped: FFmpeg finished.
+                    return;
+                }
             }
         }
-        // std_rx.recv() returning Err means std_tx was dropped: FFmpeg finished.
     });
 
     // FFmpeg pipeline runs in spawn_blocking; sends chunks via std_tx.
