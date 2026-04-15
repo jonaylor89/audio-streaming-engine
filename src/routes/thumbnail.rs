@@ -14,7 +14,7 @@ use crate::{
     state::AppStateDyn,
     streamingpath::{hasher::suffix_result_storage_hasher, params::Params},
     thumbnail::{ThumbnailConfig, ThumbnailResult, analyze},
-    utils::{AppError, e404, e413, e500},
+    utils::{AppError, e404, e413, e500, sniff_content_type},
 };
 
 #[derive(Debug, Deserialize)]
@@ -22,14 +22,6 @@ pub struct ThumbnailQuery {
     pub thumbnail_duration: Option<f64>,
     pub thumbnail_min_duration: Option<f64>,
     pub thumbnail_max_duration: Option<f64>,
-}
-
-/// Detect MIME type from the raw audio bytes using magic-byte sniffing,
-/// matching the same approach used by `cache_middleware` on cache hits.
-fn sniff_content_type(buf: &[u8]) -> String {
-    infer::get(buf)
-        .map(|t| t.to_string())
-        .unwrap_or_else(|| "audio/mpeg".to_string())
 }
 
 #[instrument(skip(state, headers, cache_miss))]

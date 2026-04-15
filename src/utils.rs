@@ -66,3 +66,10 @@ where
 {
     AppError::new(e.into(), StatusCode::RANGE_NOT_SATISFIABLE)
 }
+
+/// Detect MIME type from raw audio bytes using magic-byte sniffing.
+pub fn sniff_content_type(buf: &[u8]) -> String {
+    infer::get(buf)
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "audio/mpeg".to_string())
+}

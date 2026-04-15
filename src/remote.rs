@@ -5,7 +5,7 @@ use serde::Deserialize;
 use tracing::warn;
 
 use crate::blob::AudioBuffer;
-use crate::utils::{AppError, e413, e404, e500};
+use crate::utils::{AppError, e404, e413, e500};
 
 const AUDIOUS_API_BASE_URL: &str = "https://api.audius.co/v1";
 

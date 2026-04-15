@@ -9,7 +9,7 @@ use crate::{
     remote::fetch_audio_buffer,
     state::AppStateDyn,
     streamingpath::{hasher::suffix_result_storage_hasher, params::Params},
-    utils::{AppError, e404, e413, e500},
+    utils::{AppError, e404, e413, e500, sniff_content_type},
 };
 
 #[instrument(skip(state, headers, cache_miss))]
@@ -81,14 +81,6 @@ pub async fn streamingpath_handler(
         }
         CoalesceResult::Failed(err) => Err(e500(eyre!("request failed (cached): {}", err))),
     }
-}
-
-/// Detect MIME type from the raw audio bytes using magic-byte sniffing,
-/// matching the same approach used by `cache_middleware` on cache hits.
-fn sniff_content_type(buf: &[u8]) -> String {
-    infer::get(buf)
-        .map(|t| t.to_string())
-        .unwrap_or_else(|| "audio/mpeg".to_string())
 }
 
 async fn fetch_and_process(state: &AppStateDyn, params: &Params) -> Result<AudioBuffer, AppError> {

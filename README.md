@@ -112,7 +112,7 @@ Uses YAML config files + environment variable overrides.
 
 Environment variables: `APP_SECTION__KEY=value` (e.g., `APP_APPLICATION__PORT=8080`)
 
-See [full configuration docs](./docs/) for details.
+See [architecture docs](./docs/ARCHITECTURE.md) for details.
 
 ## Development
 
