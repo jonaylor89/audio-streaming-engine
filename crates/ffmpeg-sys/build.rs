@@ -45,6 +45,11 @@ fn main() {
         // Common dependencies for static FFmpeg builds
         #[cfg(target_os = "linux")]
         {
+            // Codec libraries that FFmpeg was compiled with
+            for lib in ["fdk-aac", "mp3lame", "vorbis", "vorbisenc", "opus", "ogg"] {
+                println!("cargo:rustc-link-lib={}", lib);
+            }
+            // System libraries
             println!("cargo:rustc-link-lib=z");
             println!("cargo:rustc-link-lib=bz2");
             println!("cargo:rustc-link-lib=lzma");

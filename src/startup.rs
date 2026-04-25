@@ -29,7 +29,6 @@ use axum::routing::get;
 use axum::{Router, serve::Serve};
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, eyre};
-#[cfg(feature = "s3")]
 use secrecy::ExposeSecret;
 use std::future::ready;
 use std::path::PathBuf;
@@ -57,6 +56,30 @@ impl Application {
         let web_ui = config.application.web_ui;
 
         let environment = std::env::var("APP_ENVIRONMENT").unwrap_or_else(|_| "local".into());
+
+        if config.application.hmac_secret.expose_secret() == "this-is-a-secret" {
+            if environment == "local" {
+                tracing::info!("using default HMAC secret (fine for local development)");
+            } else {
+                tracing::warn!(
+                    "⚠️  HMAC secret is set to the default value. This is insecure for any non-local deployment. Set APP_APPLICATION__HMAC_SECRET to a strong random value."
+                );
+            }
+        }
+
+        if environment == "localhost" {
+            tracing::info!(
+                r#"\n
+  ____  _                             _             _____             _
+ / ___|| |_ _ __ ___  __ _ _ __ ___ (_)_ __   __ _| ____|_ __   __ _(_)_ __   ___
+ \___ \| __| '__/ _ \/ _` | '_ ` _ \| | '_ \ / _` |  _| | '_ \ / _` | | '_ \ / _ \
+  ___) | |_| | |  __/ (_| | | | | | | | | | | (_| | |___| | | | (_| | | | | |  __/
+ |____/ \__|_|  \___|\__,_|_| |_| |_|_|_| |_|\__, |_____|_| |_|\__, |_|_| |_|\___|
+                                             |___/              |___/
+        "#
+            );
+        }
+
         let storage_backend = match &config.storage.client {
             Some(crate::config::StorageClient::S3(_)) => "s3",
             Some(crate::config::StorageClient::GCS(_)) => "gcs",
@@ -127,17 +150,8 @@ impl Application {
 
         Ok(Self { port, server })
     }
+
     pub async fn run_until_stopped(self) -> Result<(), std::io::Error> {
-        println!(
-            r#"\n
-  ____  _                             _             _____             _
- / ___|| |_ _ __ ___  __ _ _ __ ___ (_)_ __   __ _| ____|_ __   __ _(_)_ __   ___
- \___ \| __| '__/ _ \/ _` | '_ ` _ \| | '_ \ / _` |  _| | '_ \ / _` | | '_ \ / _ \
-  ___) | |_| | |  __/ (_| | | | | | | | | | | (_| | |___| | | | (_| | | | | |  __/
- |____/ \__|_|  \___|\__,_|_| |_| |_|_|_| |_|\__, |_____|_| |_|\__, |_|_| |_|\___|
-                                             |___/              |___/
-        "#
-        );
         self.server.await
     }
 }

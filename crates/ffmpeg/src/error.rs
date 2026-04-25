@@ -66,7 +66,7 @@ impl From<std::io::Error> for FfmpegError {
 
 /// Convert FFmpeg error code to human-readable string.
 pub fn error_string(code: i32) -> String {
-    let mut buf = [0i8; 256];
+    let mut buf = [0 as std::ffi::c_char; 256];
     unsafe {
         ffmpeg_sys::av_strerror(code, buf.as_mut_ptr(), buf.len());
         CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned()

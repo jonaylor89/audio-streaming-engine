@@ -167,6 +167,7 @@ impl Default for CacheSettings {
 
 pub enum Environment {
     Local,
+    Docker,
     Production,
 }
 
@@ -174,6 +175,7 @@ impl Environment {
     pub fn as_str(&self) -> &'static str {
         match self {
             Environment::Local => "local",
+            Environment::Docker => "docker",
             Environment::Production => "production",
         }
     }
@@ -185,9 +187,10 @@ impl TryFrom<String> for Environment {
     fn try_from(s: String) -> Result<Self, Self::Error> {
         match s.to_lowercase().as_str() {
             "local" => Ok(Self::Local),
+            "docker" => Ok(Self::Docker),
             "production" => Ok(Self::Production),
             other => Err(format!(
-                "{} is not a supported environment. Use either `local` or `production`",
+                "{} is not a supported environment. Use either `local`, `docker`, or `production`",
                 other
             )),
         }
@@ -206,7 +209,7 @@ pub fn get_configuration() -> Result<Settings, config::ConfigError> {
     let builder = config::Config::builder()
         .add_source(config::File::from(configuration_directory.join("base")).required(true))
         .add_source(
-            config::File::from(configuration_directory.join(environment.as_str())).required(true),
+            config::File::from(configuration_directory.join(environment.as_str())).required(false),
         )
         .add_source(
             config::Environment::with_prefix("APP")

@@ -6,7 +6,7 @@ steps:
       [
         "build",
         "-f",
-        "Dockerfile.streaming",
+        "Dockerfile",
         "-t",
         "gcr.io/$PROJECT_ID/streaming-engine:$COMMIT_SHA",
         ".",

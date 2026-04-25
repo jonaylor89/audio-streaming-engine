@@ -20,7 +20,3 @@ processor:
   max_cache_mem: 256
   max_cache_size: 1024
   max_source_size: 104857600  # 100 MB
-
-cache:
-  Filesystem:
-    base_dir: "cache"

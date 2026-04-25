@@ -7,8 +7,8 @@ MCP (Model Context Protocol) server for [streaming-engine](https://github.com/jo
 Clone the repository and set up the MCP server:
 
 ```bash
-git clone https://github.com/jonaylor89/freqmoda.git
-cd freqmoda/streaming-engine/mcp-server
+git clone https://github.com/jonaylor89/audio-streaming-engine.git
+cd audio-streaming-engine/mcp-server
 npm install
 ```
 
@@ -26,7 +26,7 @@ Add this to your Claude Desktop config:
     "streaming-engine-audio": {
       "command": "node",
       "args": [
-        "/path/to/freqmoda/streaming-engine/mcp-server/cli.js"
+        "/path/to/audio-streaming-engine/mcp-server/cli.js"
       ],
       "env": {
         "STREAMING_ENGINE_SERVER_URL": "http://localhost:8080"
@@ -43,7 +43,7 @@ Add this to your Claude Desktop config:
     "streaming-engine-audio": {
       "command": "node",
       "args": [
-        "/path/to/freqmoda/streaming-engine/mcp-server/cli.js"
+        "/path/to/audio-streaming-engine/mcp-server/cli.js"
       ],
       "env": {
         "STREAMING_ENGINE_SERVER_URL": "https://your-streaming-engine-server.run.app"
@@ -53,7 +53,7 @@ Add this to your Claude Desktop config:
 }
 ```
 
-**Note:** Replace `/path/to/freqmoda` with the actual path where you cloned the repository.
+**Note:** Replace `/path/to/audio-streaming-engine` with the actual path where you cloned the repository.
 
 ## Available Tools
 
@@ -91,13 +91,13 @@ To test that everything is working:
 
 1. **Start your streaming engine server** (if running locally):
    ```bash
-   cd freqmoda/streaming-engine
+   cd audio-streaming-engine
    cargo run
    ```
 
 2. **Test the MCP server directly**:
    ```bash
-   cd freqmoda/streaming-engine/mcp-server
+   cd audio-streaming-engine/mcp-server
    STREAMING_ENGINE_SERVER_URL=http://localhost:8080 node cli.js
    ```
 
@@ -106,12 +106,8 @@ To test that everything is working:
 ## Development
 
 ```bash
-git clone https://github.com/jonaylor89/freqmoda.git
-cd freqmoda/streaming-engine/mcp-server
+git clone https://github.com/jonaylor89/audio-streaming-engine.git
+cd audio-streaming-engine/mcp-server
 npm install
 npm start
 ```
-
-## License
-
-MIT

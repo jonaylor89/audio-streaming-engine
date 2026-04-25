@@ -1,7 +1,8 @@
 # Stage 1: Build static FFmpeg with required codecs
 FROM debian:bookworm-slim AS ffmpeg-build
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN echo "deb http://deb.debian.org/debian bookworm non-free" >> /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     yasm \
@@ -20,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /ffmpeg
 
 # Download and build FFmpeg statically
-ARG FFMPEG_VERSION=6.1
+ARG FFMPEG_VERSION=8.1
 RUN curl -L https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.bz2 | tar xj --strip-components=1
 
 RUN ./configure \
@@ -72,27 +73,18 @@ RUN ./configure \
     && make -j$(nproc) \
     && make install
 
-# Create pkg-config files for static linking
-RUN mkdir -p /opt/ffmpeg/lib/pkgconfig && \
-    for lib in avformat avcodec avfilter swresample avutil; do \
-        echo "prefix=/opt/ffmpeg" > /opt/ffmpeg/lib/pkgconfig/lib${lib}.pc && \
-        echo "libdir=\${prefix}/lib" >> /opt/ffmpeg/lib/pkgconfig/lib${lib}.pc && \
-        echo "includedir=\${prefix}/include" >> /opt/ffmpeg/lib/pkgconfig/lib${lib}.pc && \
-        echo "" >> /opt/ffmpeg/lib/pkgconfig/lib${lib}.pc && \
-        echo "Name: lib${lib}" >> /opt/ffmpeg/lib/pkgconfig/lib${lib}.pc && \
-        echo "Description: FFmpeg ${lib} library" >> /opt/ffmpeg/lib/pkgconfig/lib${lib}.pc && \
-        echo "Version: ${FFMPEG_VERSION}" >> /opt/ffmpeg/lib/pkgconfig/lib${lib}.pc && \
-        echo "Libs: -L\${libdir} -l${lib}" >> /opt/ffmpeg/lib/pkgconfig/lib${lib}.pc && \
-        echo "Cflags: -I\${includedir}" >> /opt/ffmpeg/lib/pkgconfig/lib${lib}.pc; \
-    done
+# FFmpeg's `make install` already generates .pc files with correct
+# Libs.private entries for static linking (fdk-aac, mp3lame, etc.),
+# so no manual pkg-config generation is needed.
 
 # -----------------------------
 
-FROM lukemathwalker/cargo-chef:latest-rust-1.87.0 AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.95.0 AS chef
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN echo "deb http://deb.debian.org/debian bookworm non-free" >> /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
     lld \
     clang \
     libclang-dev \
@@ -129,11 +121,11 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 
 # Build dependencies with FFmpeg static linking
-RUN cargo chef cook --release --recipe-path recipe.json --features gcs
+RUN cargo chef cook --release --recipe-path recipe.json
 
 COPY . .
 
-RUN cargo build --release --features gcs
+RUN cargo build --release
 
 # ----------------------------
 
@@ -141,8 +133,11 @@ FROM debian:bookworm-slim AS runtime
 
 WORKDIR /app
 
-RUN apt-get update -y \
-    && apt-get install -y --no-install-recommends openssl ca-certificates curl \
+RUN echo "deb http://deb.debian.org/debian bookworm non-free" >> /etc/apt/sources.list && \
+    apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        openssl ca-certificates curl \
+        libmp3lame0 libvorbis0a libvorbisenc2 libopus0 libfdk-aac2 libogg0 \
     && apt-get autoremove -y \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*

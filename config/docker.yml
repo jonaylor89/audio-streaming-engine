@@ -1,0 +1,3 @@
+cache:
+  Redis:
+    uri: "redis://redis:6379"

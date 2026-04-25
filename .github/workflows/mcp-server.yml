@@ -1,0 +1,33 @@
+name: MCP Server
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "mcp-server/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "mcp-server/**"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp-server
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: mcp-server/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: npm test

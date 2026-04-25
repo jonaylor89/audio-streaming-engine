@@ -551,7 +551,7 @@ impl AudioProcessor {
         let buffersrc = get_filter("abuffer")?;
         let buffersink = get_filter("abuffersink")?;
 
-        let mut in_ch_layout_str = [0i8; 64];
+        let mut in_ch_layout_str = [0 as std::ffi::c_char; 64];
         unsafe {
             av_channel_layout_describe(
                 decoder.ch_layout(),
@@ -595,7 +595,7 @@ impl AudioProcessor {
                 .to_string_lossy()
                 .into_owned()
         };
-        let mut out_ch_layout_str = [0i8; 64];
+        let mut out_ch_layout_str = [0 as std::ffi::c_char; 64];
         unsafe {
             av_channel_layout_describe(
                 out_layout,
