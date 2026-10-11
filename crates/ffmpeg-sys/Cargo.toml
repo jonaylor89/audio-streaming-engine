@@ -8,6 +8,9 @@ publish = false
 [lib]
 name = "ffmpeg_sys"
 path = "src/lib.rs"
+# The generated bindings carry FFmpeg's C doc comments, which rustdoc would
+# try (and fail) to compile as Rust examples.
+doctest = false
 
 [dependencies]
 libc = "0.2"

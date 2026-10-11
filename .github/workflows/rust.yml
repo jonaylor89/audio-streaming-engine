@@ -12,15 +12,24 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 8.1 is what the Docker image ships; 9.0 is the current release
+        # (and what Homebrew installs).
+        ffmpeg: ["8.1", "9.0"]
+    name: build (FFmpeg ${{ matrix.ffmpeg }})
 
     steps:
       - uses: actions/checkout@v4
-      - name: Install FFmpeg development libraries
+      - name: Install FFmpeg ${{ matrix.ffmpeg }}
+        # Prebuilt shared libraries + headers; Ubuntu's packaged FFmpeg (6.1)
+        # is too old for this project.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config \
-            libavcodec-dev libavdevice-dev libavfilter-dev \
-            libavformat-dev libswresample-dev libavutil-dev
+          name=ffmpeg-n${{ matrix.ffmpeg }}-latest-linux64-gpl-shared-${{ matrix.ffmpeg }}
+          curl -sSfL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$name.tar.xz" | tar xJ -C "$RUNNER_TEMP"
+          echo "FFMPEG_DIR=$RUNNER_TEMP/$name" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/$name/lib" >> "$GITHUB_ENV"
       - name: Build
         run: cargo build --verbose
       - name: Run tests
