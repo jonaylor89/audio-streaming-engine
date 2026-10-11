@@ -39,6 +39,46 @@ pub fn is_eagain(err: i32) -> bool {
     err == AVERROR_EAGAIN || err == averror(libc::EAGAIN)
 }
 
+/// The first sample format an encoder supports, if it declares any.
+///
+/// Uses `avcodec_get_supported_config` where available (FFmpeg 7.1+; required
+/// on FFmpeg 9, which removed `AVCodec::sample_fmts`), and the
+/// `sample_fmts` field on older versions.
+///
+/// # Safety
+/// `codec` must point to a valid `AVCodec`.
+pub unsafe fn first_supported_sample_fmt(codec: *const AVCodec) -> Option<AVSampleFormat> {
+    #[cfg(has_avcodec_get_supported_config)]
+    {
+        let mut fmts: *const libc::c_void = core::ptr::null();
+        let mut num: libc::c_int = 0;
+        let ret = unsafe {
+            avcodec_get_supported_config(
+                core::ptr::null(),
+                codec,
+                AVCodecConfig::AV_CODEC_CONFIG_SAMPLE_FORMAT,
+                0,
+                &mut fmts,
+                &mut num,
+            )
+        };
+        if ret < 0 || fmts.is_null() || num <= 0 {
+            None
+        } else {
+            Some(unsafe { *(fmts as *const AVSampleFormat) })
+        }
+    }
+    #[cfg(not(has_avcodec_get_supported_config))]
+    {
+        let fmts = unsafe { (*codec).sample_fmts };
+        if fmts.is_null() {
+            None
+        } else {
+            Some(unsafe { *fmts })
+        }
+    }
+}
+
 /// Check if error code indicates end of file
 #[inline]
 pub fn is_eof(err: i32) -> bool {

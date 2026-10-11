@@ -101,10 +101,18 @@ fn main() {
         .generate()
         .expect("Unable to generate FFmpeg bindings");
 
+    // Feature-detect APIs that differ between FFmpeg versions from the
+    // generated bindings, which always match the headers actually in use.
+    // `avcodec_get_supported_config` arrived in FFmpeg 7.1 and replaces
+    // `AVCodec::sample_fmts`, which FFmpeg 9 removed.
+    let bindings = bindings.to_string();
+    println!("cargo::rustc-check-cfg=cfg(has_avcodec_get_supported_config)");
+    if bindings.contains("pub fn avcodec_get_supported_config(") {
+        println!("cargo:rustc-cfg=has_avcodec_get_supported_config");
+    }
+
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    bindings
-        .write_to_file(out_path.join("bindings.rs"))
-        .expect("Couldn't write bindings");
+    std::fs::write(out_path.join("bindings.rs"), bindings).expect("Couldn't write bindings");
 }
 
 fn try_pkg_config(static_link: bool) -> Result<(String, String), String> {

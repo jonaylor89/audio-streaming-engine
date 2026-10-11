@@ -158,24 +158,8 @@ impl AudioProcessor {
         }
         encoder.set_ch_layout(&out_layout)?;
 
-        // `AVCodec::sample_fmts` was removed in FFmpeg 9; this API exists since 7.1.
-        let mut sample_fmts: *const std::ffi::c_void = ptr::null();
-        let mut num_fmts: std::ffi::c_int = 0;
-        let ret = unsafe {
-            avcodec_get_supported_config(
-                ptr::null(),
-                encoder_codec,
-                AVCodecConfig::AV_CODEC_CONFIG_SAMPLE_FORMAT,
-                0,
-                &mut sample_fmts,
-                &mut num_fmts,
-            )
-        };
-        let out_sample_fmt = if ret >= 0 && !sample_fmts.is_null() && num_fmts > 0 {
-            unsafe { *(sample_fmts as *const AVSampleFormat) }
-        } else {
-            AVSampleFormat::AV_SAMPLE_FMT_FLTP
-        };
+        let out_sample_fmt = unsafe { ffmpeg_sys::first_supported_sample_fmt(encoder_codec) }
+            .unwrap_or(AVSampleFormat::AV_SAMPLE_FMT_FLTP);
         encoder.set_sample_fmt(out_sample_fmt);
 
         if let Some(bit_rate) = opts.output_format.bit_rate {
