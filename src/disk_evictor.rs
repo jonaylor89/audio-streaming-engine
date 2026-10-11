@@ -207,7 +207,7 @@ fn saturating_sub(counter: &AtomicU64, n: u64) {
 /// Scan the directory once to compute total size of data files.
 async fn scan_total_size(dir: &Path, skip_ext: Option<&str>) -> Result<u64> {
     let mut total: u64 = 0;
-    if !dir.exists() {
+    if !fs::try_exists(dir).await.unwrap_or(false) {
         return Ok(0);
     }
     let mut rd = fs::read_dir(dir).await?;

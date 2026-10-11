@@ -7,14 +7,15 @@ use axum::{
 use bytes::Bytes;
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
+use std::sync::Arc;
 use tracing::{info, instrument, warn};
 
 use crate::{
     blob::{AudioBuffer, AudioFormat},
     processor::ffmpeg::is_passthrough_for_format,
-    remote::fetch_audio_buffer,
     state::AppStateDyn,
+    storage::AudioStorage,
     streamingpath::{hasher::suffix_result_storage_hasher, params::Params},
     utils::{AppError, e404, e413, e500},
 };
@@ -73,54 +74,12 @@ pub async fn stream_handler(
             e404(eyre!("Failed to fetch audio: {}", e))
         })?;
 
-        // Tee: forward to HTTP response and collect for result storage
-        let (http_tx, http_rx) = tokio::sync::mpsc::channel::<Result<Bytes>>(8);
-        let (store_tx, store_rx) = tokio::sync::mpsc::channel::<Bytes>(8);
-
-        tokio::spawn(async move {
-            futures::pin_mut!(storage_stream);
-            while let Some(chunk) = storage_stream.next().await {
-                match chunk {
-                    Ok(bytes) => {
-                        let _ = store_tx.send(bytes.clone()).await;
-                        if http_tx.send(Ok(bytes)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = http_tx.send(Err(e)).await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        let bg_storage = state.result_storage.clone();
-        let bg_hash = params_hash;
-        let bg_format = source_format;
-        tokio::spawn(async move {
-            let mut chunks: Vec<Bytes> = Vec::new();
-            let mut rx = store_rx;
-            while let Some(chunk) = rx.recv().await {
-                chunks.push(chunk);
-            }
-            if !chunks.is_empty() {
-                let mut total = bytes::BytesMut::new();
-                for chunk in chunks {
-                    total.extend_from_slice(&chunk);
-                }
-                let audio_buf = AudioBuffer::from_bytes_with_format(total.freeze(), bg_format);
-                if let Err(e) = bg_storage.put(&bg_hash, &audio_buf).await {
-                    warn!("Failed to save result audio [{}]: {}", &bg_hash, e);
-                }
-            }
-        });
-
-        let http_stream = futures::stream::unfold(http_rx, |mut rx| async move {
-            rx.recv()
-                .await
-                .map(|item| (item.map_err(|e| std::io::Error::other(e.to_string())), rx))
-        });
+        let http_stream = tee_to_result_storage(
+            storage_stream,
+            state.result_storage.clone(),
+            params_hash,
+            source_format,
+        );
 
         return Response::builder()
             .header(header::CONTENT_TYPE, mime)
@@ -130,7 +89,10 @@ pub async fn stream_handler(
 
     // Non-passthrough: fetch entire source into memory (FFmpeg needs seekable input)
     let blob = if is_remote {
-        fetch_audio_buffer(&state.http_client, &params.key, state.max_source_size).await?
+        state
+            .remote
+            .fetch(&params.key, state.max_source_size)
+            .await?
     } else {
         state.storage.get(&params.key).await.map_err(|e| {
             tracing::error!("Failed to fetch audio from storage {}: {}", params.key, e);
@@ -160,66 +122,64 @@ pub async fn stream_handler(
             e500(eyre!("Failed to process audio: {}", e))
         })?;
 
-    // Tee: forward each chunk to the HTTP response AND collect for storage.
-    // Two channels; a tee task pulls from the FFmpeg stream and fans out.
-    let (http_tx, http_rx) = tokio::sync::mpsc::channel::<Result<Bytes>>(8);
-    let (store_tx, store_rx) = tokio::sync::mpsc::channel::<Bytes>(8);
-
-    // Tee task: drives the FFmpeg stream and fans out to HTTP + storage channels
-    tokio::spawn(async move {
-        futures::pin_mut!(stream);
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bytes) => {
-                    // If storage collector disconnected, just continue streaming to HTTP
-                    let _ = store_tx.send(bytes.clone()).await;
-                    if http_tx.send(Ok(bytes)).await.is_err() {
-                        // HTTP client disconnected — stop processing
-                        break;
-                    }
-                }
-                Err(e) => {
-                    // Propagate error to HTTP consumer; abandon storage write
-                    let _ = http_tx.send(Err(e)).await;
-                    break;
-                }
-            }
-        }
-        // Dropping store_tx signals the storage collector that all chunks are sent
-    });
-
-    // Storage collector: accumulates all chunks and calls result_storage.put when done
-    let bg_storage = state.result_storage.clone();
-    let bg_hash = params_hash;
-    let bg_format = output_format;
-    tokio::spawn(async move {
-        let mut chunks: Vec<Bytes> = Vec::new();
-        let mut rx = store_rx;
-        while let Some(chunk) = rx.recv().await {
-            chunks.push(chunk);
-        }
-        // All chunks received (store_tx was dropped) — assemble and persist
-        if !chunks.is_empty() {
-            let mut total = bytes::BytesMut::new();
-            for chunk in chunks {
-                total.extend_from_slice(&chunk);
-            }
-            let audio_buf = AudioBuffer::from_bytes_with_format(total.freeze(), bg_format);
-            if let Err(e) = bg_storage.put(&bg_hash, &audio_buf).await {
-                warn!("Failed to save result audio [{}]: {}", &bg_hash, e);
-            }
-        }
-    });
-
-    // Build chunked HTTP response from the tee'd HTTP channel
-    let http_stream = futures::stream::unfold(http_rx, |mut rx| async move {
-        rx.recv()
-            .await
-            .map(|item| (item.map_err(|e| std::io::Error::other(e.to_string())), rx))
-    });
+    let http_stream = tee_to_result_storage(
+        stream,
+        state.result_storage.clone(),
+        params_hash,
+        output_format,
+    );
 
     Response::builder()
         .header(header::CONTENT_TYPE, mime)
         .body(Body::from_stream(http_stream))
         .map_err(|e| e500(eyre!("Failed to build response: {}", e)))
+}
+
+/// Forward `source` to the HTTP response while collecting it, and write the
+/// collected bytes to result storage once the source ends cleanly.
+///
+/// Nothing is stored if the source yields an error (e.g. FFmpeg failed
+/// mid-stream) or the client disconnects, so a truncated body never becomes
+/// the permanent result for this hash.
+fn tee_to_result_storage(
+    source: impl Stream<Item = Result<Bytes>> + Send + 'static,
+    storage: Arc<dyn AudioStorage>,
+    hash: String,
+    format: AudioFormat,
+) -> impl Stream<Item = std::io::Result<Bytes>> {
+    let (http_tx, http_rx) = tokio::sync::mpsc::channel::<Result<Bytes>>(8);
+
+    tokio::spawn(async move {
+        futures::pin_mut!(source);
+        let mut collected = bytes::BytesMut::new();
+        while let Some(chunk) = source.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    collected.extend_from_slice(&bytes);
+                    if http_tx.send(Ok(bytes)).await.is_err() {
+                        // Client disconnected; dropping `source` stops FFmpeg.
+                        return;
+                    }
+                }
+                Err(e) => {
+                    let _ = http_tx.send(Err(e)).await;
+                    return;
+                }
+            }
+        }
+        drop(http_tx);
+
+        if !collected.is_empty() {
+            let audio_buf = AudioBuffer::from_bytes_with_format(collected.freeze(), format);
+            if let Err(e) = storage.put(&hash, &audio_buf).await {
+                warn!("Failed to save result audio [{}]: {}", &hash, e);
+            }
+        }
+    });
+
+    futures::stream::unfold(http_rx, |mut rx| async move {
+        rx.recv()
+            .await
+            .map(|item| (item.map_err(|e| std::io::Error::other(e.to_string())), rx))
+    })
 }

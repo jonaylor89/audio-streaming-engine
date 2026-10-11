@@ -92,7 +92,7 @@ pub async fn cache_middleware(
 pub async fn auth_middleware(
     State(state): State<AppStateDyn>,
     params: Params,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Result<impl IntoResponse, AppError> {
     let path = params.to_string();
@@ -110,6 +110,10 @@ pub async fn auth_middleware(
         )
         .map_err(|e| e400(eyre!("Failed to verify hash: {}", e)))?;
     }
+
+    // The `Params` extractor takes the parsed value out of the extensions;
+    // put it back so the handler doesn't parse the path again.
+    req.extensions_mut().insert(params);
 
     Ok(next.run(req).await)
 }

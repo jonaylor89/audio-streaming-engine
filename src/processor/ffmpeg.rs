@@ -3,7 +3,6 @@ use std::pin::Pin;
 use bytes::Bytes;
 use color_eyre::Result;
 use futures::Stream;
-use std::sync::mpsc;
 use tracing::instrument;
 
 use crate::{
@@ -203,69 +202,39 @@ pub async fn process_audio_streaming(
     let start_time = params.start_time;
     let duration = params.duration;
 
-    // Bounded sync channel: provides backpressure so FFmpeg blocks when the
-    // HTTP consumer is slow, preventing unbounded buffering.
-    let (std_tx, std_rx) = mpsc::sync_channel::<Bytes>(8);
+    // Bounded channel: FFmpeg's thread blocks in `blocking_send` when the HTTP
+    // consumer is slow, preventing unbounded buffering. Mid-stream FFmpeg
+    // errors are forwarded as an `Err` item so consumers can tell a truncated
+    // stream from a complete one.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes>>(8);
+    let err_tx = tx.clone();
 
-    // Bridge: drain the std::sync channel and forward to a tokio channel that
-    // the async stream can consume. This is a lightweight async task — no
-    // blocking thread needed since we poll with try_recv.
-    let (tokio_tx, tokio_rx) = tokio::sync::mpsc::channel::<Result<Bytes>>(8);
-    let bridge_tx = tokio_tx;
-    tokio::spawn(async move {
-        loop {
-            match std_rx.try_recv() {
-                Ok(chunk) => {
-                    if bridge_tx.send(Ok(chunk)).await.is_err() {
-                        // Receiver dropped (client disconnected) — stop bridge.
-                        return;
-                    }
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    // Channel empty — yield briefly to avoid busy-spinning.
-                    tokio::task::yield_now().await;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    // std_tx was dropped: FFmpeg finished.
-                    return;
-                }
-            }
-        }
-    });
-
-    // FFmpeg pipeline runs in spawn_blocking; sends chunks via std_tx.
-    // The semaphore permit is held for the duration of FFmpeg processing.
+    // FFmpeg pipeline runs in spawn_blocking; the semaphore permit is held for
+    // the duration of FFmpeg processing.
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let processor = match ffmpeg::AudioProcessor::new() {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!("Failed to create FFmpeg processor: {}", e);
-                // std_tx dropped here → bridge sees EOF → stream ends
-                return;
-            }
-        };
-        if let Err(e) = processor.process_streaming(
-            ffmpeg::ProcessOptions {
-                input: input_bytes,
-                output_format: output_spec,
-                filters,
-                metadata: &metadata,
-                start_time,
-                duration,
-            },
-            std_tx,
-        ) {
-            // process_streaming returned an error. std_tx has already been moved
-            // into StreamingOutputContext (and dropped on return), so the bridge
-            // sees EOF. The stream will end without an explicit error item.
-            // This means mid-stream errors cause a truncated response — acceptable
-            // for the initial streaming implementation.
+        let result = ffmpeg::AudioProcessor::new().and_then(|processor| {
+            processor.process_streaming(
+                ffmpeg::ProcessOptions {
+                    input: input_bytes,
+                    output_format: output_spec,
+                    filters,
+                    metadata: &metadata,
+                    start_time,
+                    duration,
+                },
+                // Returns false once the receiver is dropped (client
+                // disconnected), which makes FFmpeg abort.
+                Box::new(move |chunk| tx.blocking_send(Ok(chunk)).is_ok()),
+            )
+        });
+        if let Err(e) = result {
             tracing::error!("FFmpeg streaming error: {}", e);
+            let _ = err_tx.blocking_send(Err(e.into()));
         }
     });
 
-    let stream = futures::stream::unfold(tokio_rx, |mut rx| async move {
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|item| (item, rx))
     });
 
@@ -367,5 +336,79 @@ mod tests {
             "expected areverse+fade_in+areverse trick, got: {}",
             filters,
         );
+    }
+
+    /// Mono 16-bit WAV of `secs` seconds: silent except a 440 Hz tone
+    /// between `tone_from` and `tone_to` seconds.
+    fn wav_with_tone(secs: u32, tone_from: f32, tone_to: f32) -> AudioBuffer {
+        const RATE: u32 = 44_100;
+        let n = (RATE * secs) as usize;
+        let mut wav = Vec::with_capacity(44 + n * 2);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + n as u32 * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&RATE.to_le_bytes());
+        wav.extend_from_slice(&(RATE * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(n as u32 * 2).to_le_bytes());
+        for i in 0..n {
+            let t = i as f32 / RATE as f32;
+            let s = if (tone_from..tone_to).contains(&t) {
+                (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.5
+            } else {
+                0.0
+            };
+            wav.extend_from_slice(&((s * i16::MAX as f32) as i16).to_le_bytes());
+        }
+        AudioBuffer::from_bytes_with_format(wav, AudioFormat::Wav)
+    }
+
+    /// Returns (duration in seconds, RMS) of an encoded clip.
+    fn duration_and_rms(clip: &AudioBuffer) -> (f64, f32) {
+        let pcm = ffmpeg::decode_to_pcm(clip.bytes()).unwrap();
+        let rms =
+            (pcm.samples.iter().map(|s| s * s).sum::<f32>() / pcm.samples.len() as f32).sqrt();
+        (pcm.samples.len() as f64 / pcm.sample_rate as f64, rms)
+    }
+
+    /// Trimming seeks into the source instead of decoding from the start; the
+    /// clip must still come from the requested position.
+    #[tokio::test]
+    async fn test_trim_after_seek_selects_requested_range() {
+        let source = process_audio(
+            &wav_with_tone(60, 40.0, 45.0),
+            &Params {
+                format: Some(AudioFormat::Mp3),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let trim = |start: f64| Params {
+            format: Some(AudioFormat::Mp3),
+            start_time: Some(start),
+            duration: Some(5.0),
+            ..Default::default()
+        };
+
+        let (duration, rms) = duration_and_rms(&process_audio(&source, &trim(40.0)).await.unwrap());
+        assert!(
+            (duration - 5.0).abs() < 0.2,
+            "expected ~5s clip, got {duration}s"
+        );
+        assert!(rms > 0.2, "clip at 40s should contain the tone, rms={rms}");
+
+        let (duration, rms) = duration_and_rms(&process_audio(&source, &trim(30.0)).await.unwrap());
+        assert!(
+            (duration - 5.0).abs() < 0.2,
+            "expected ~5s clip, got {duration}s"
+        );
+        assert!(rms < 0.01, "clip at 30s should be silent, rms={rms}");
     }
 }

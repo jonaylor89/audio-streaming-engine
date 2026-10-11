@@ -537,13 +537,18 @@ impl OutputWrite for OutputContext {
     }
 }
 
-/// Channel-backed writer: sends encoded bytes to a `SyncSender` as they are
+/// Receives each encoded chunk as FFmpeg produces it. Returns `false` when the
+/// consumer has gone away, which aborts processing. May block to apply
+/// backpressure (it is always called from the FFmpeg thread).
+pub type ChunkSink = Box<dyn FnMut(bytes::Bytes) -> bool + Send>;
+
+/// Sink-backed writer: hands encoded bytes to a [`ChunkSink`] as they are
 /// produced by FFmpeg, instead of accumulating them in a `Vec<u8>`.
 pub(crate) struct ChannelWriter {
-    sender: std::sync::mpsc::SyncSender<bytes::Bytes>,
+    sink: ChunkSink,
 }
 
-/// RAII wrapper for AVIOContext used for streaming output via a channel.
+/// RAII wrapper for AVIOContext used for streaming output via a [`ChunkSink`].
 /// Suitable for container formats that write sequentially without seeking
 /// their output (MP3, OGG/Vorbis, OGG/Opus).
 pub struct StreamingOutputContext {
@@ -554,10 +559,7 @@ pub struct StreamingOutputContext {
 }
 
 impl StreamingOutputContext {
-    pub fn open(
-        format_name: &str,
-        sender: std::sync::mpsc::SyncSender<bytes::Bytes>,
-    ) -> Result<Self, FfmpegError> {
+    pub fn open(format_name: &str, sink: ChunkSink) -> Result<Self, FfmpegError> {
         let format_c = CString::new(format_name).unwrap();
 
         let mut format: *mut AVFormatContext = ptr::null_mut();
@@ -580,7 +582,7 @@ impl StreamingOutputContext {
             )));
         }
 
-        let channel_writer = Box::into_raw(Box::new(ChannelWriter { sender }));
+        let channel_writer = Box::into_raw(Box::new(ChannelWriter { sink }));
 
         let avio_buffer = unsafe { av_malloc(AVIO_BUFFER_SIZE) } as *mut u8;
         if avio_buffer.is_null() {
@@ -624,12 +626,11 @@ impl StreamingOutputContext {
         })
     }
 
-    /// Flush the AVIO buffer. Dropping `self` after this will close the channel
-    /// (drop the sender), signalling EOF to the receiver.
+    /// Flush the AVIO buffer. Dropping `self` after this drops the sink.
     pub fn flush(self) -> Result<(), FfmpegError> {
         unsafe { avio_flush(self.avio) };
         Ok(())
-        // self is dropped here → channel_writer dropped → sender dropped → receiver sees EOF
+        // self is dropped here → channel_writer dropped → sink dropped
     }
 }
 
@@ -708,9 +709,10 @@ unsafe extern "C" fn channel_write_callback(
     let writer = unsafe { &mut *(opaque as *mut ChannelWriter) };
     let slice = unsafe { slice::from_raw_parts(buf as *const u8, buf_size as usize) };
     let chunk = bytes::Bytes::copy_from_slice(slice);
-    match writer.sender.send(chunk) {
-        Ok(()) => buf_size,
-        Err(_) => ffmpeg_sys::averror(libc::EIO as i32), // receiver dropped (client disconnected)
+    if (writer.sink)(chunk) {
+        buf_size
+    } else {
+        ffmpeg_sys::averror(libc::EIO as i32) // consumer gone (client disconnected)
     }
 }
 

@@ -10,6 +10,7 @@ use crate::config::LocalCacheSettings;
 use crate::disk_evictor::DiskEvictor;
 use crate::storage::AudioStorage;
 use crate::storage::backend::ByteStream;
+use crate::utils::write_atomic;
 
 #[derive(Clone)]
 pub struct CachedStorage<S> {
@@ -70,19 +71,11 @@ impl<S: AudioStorage + Clone + Send + Sync + 'static> CachedStorage<S> {
 
     async fn write_to_cache(&self, key: &str, blob: &AudioBuffer) {
         let path = self.cache_path(key);
-        if let Some(parent) = path.parent()
-            && let Err(e) = fs::create_dir_all(parent).await
-        {
-            warn!(key, error = %e, "failed to create local cache directory");
-            return;
-        }
-
-        let data = blob.as_ref();
-        if let Err(e) = fs::write(&path, data).await {
+        if let Err(e) = write_atomic(path, blob.bytes()).await {
             warn!(key, error = %e, "failed to write to local cache");
         } else {
             debug!(key, "cached source blob locally");
-            self.evictor.track_write(data.len() as u64);
+            self.evictor.track_write(blob.len() as u64);
         }
     }
 }
@@ -102,13 +95,16 @@ impl<S: AudioStorage + Clone + Send + Sync + 'static> AudioStorage for CachedSto
     async fn get_stream(&self, key: &str) -> Result<ByteStream> {
         // If the file is already in the local cache, stream from disk
         let cache_path = self.cache_path(key);
-        if cache_path.exists() {
-            debug!(key, "streaming from local cache");
-            let file = tokio::fs::File::open(cache_path).await?;
-            let stream = tokio_util::io::ReaderStream::new(file);
-            return Ok(Box::pin(futures::stream::StreamExt::map(stream, |r| {
-                r.map_err(|e| e.into())
-            })));
+        match tokio::fs::File::open(&cache_path).await {
+            Ok(file) => {
+                debug!(key, "streaming from local cache");
+                let stream = tokio_util::io::ReaderStream::new(file);
+                return Ok(Box::pin(futures::stream::StreamExt::map(stream, |r| {
+                    r.map_err(|e| e.into())
+                })));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
 
         // Cache miss: stream from inner and tee to cache in background
@@ -140,11 +136,8 @@ impl<S: AudioStorage + Clone + Send + Sync + 'static> AudioStorage for CachedSto
 
             // Write collected bytes to local cache
             if !cache_buf.is_empty() {
-                if let Some(parent) = bg_cache_path.parent() {
-                    let _ = fs::create_dir_all(parent).await;
-                }
                 let len = cache_buf.len() as u64;
-                if let Err(e) = fs::write(&bg_cache_path, &cache_buf).await {
+                if let Err(e) = write_atomic(bg_cache_path, cache_buf.freeze()).await {
                     warn!(error = %e, "failed to write stream to local cache");
                 } else {
                     debug!("cached streamed source blob locally");

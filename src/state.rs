@@ -1,7 +1,7 @@
 use crate::{
-    cache::AudioCache, inflight::InflightTracker, processor::AudioProcessor, storage::AudioStorage,
+    cache::AudioCache, inflight::InflightTracker, processor::AudioProcessor, remote::RemoteFetcher,
+    storage::AudioStorage,
 };
-use reqwest::Client;
 use secrecy::SecretString;
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ pub struct AppStateDyn {
     pub result_storage: Arc<dyn AudioStorage>,
     pub processor: Arc<dyn AudioProcessor>,
     pub cache: Arc<dyn AudioCache>,
-    pub http_client: Client,
+    pub remote: Arc<RemoteFetcher>,
     pub web_config: Option<WebConfig>,
     pub hmac_secret: SecretString,
     pub inflight: Arc<InflightTracker>,

@@ -10,7 +10,6 @@ use tracing::{info, instrument};
 
 use crate::{
     middleware::{CacheMissContext, build_audio_response},
-    remote::fetch_audio_buffer,
     state::AppStateDyn,
     streamingpath::{hasher::suffix_result_storage_hasher, params::Params},
     thumbnail::{ThumbnailConfig, ThumbnailResult, analyze},
@@ -60,7 +59,10 @@ pub async fn thumbnail_handler(
 
     // Fetch source audio
     let blob = if params.key.starts_with("https://") || params.key.starts_with("http://") {
-        fetch_audio_buffer(&state.http_client, &params.key, state.max_source_size).await?
+        state
+            .remote
+            .fetch(&params.key, state.max_source_size)
+            .await?
     } else {
         state.storage.get(&params.key).await.map_err(|e| {
             tracing::error!("Failed to fetch audio from storage {}: {}", params.key, e);

@@ -2,12 +2,12 @@ use crate::blob::AudioBuffer;
 use crate::storage::AudioStorage;
 use crate::storage::backend::ByteStream;
 use crate::streamingpath::normalize::{SafeCharsType, normalize};
+use crate::utils::write_atomic;
 use async_trait::async_trait;
 use color_eyre::Result;
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
@@ -27,10 +27,9 @@ impl AudioStorage for FileStorage {
             debug!("full path {}", p);
         }
 
-        let mut file = File::open(&full_path).await?;
-        let meta = file.metadata().await?;
-        let mut buffer = Vec::with_capacity(meta.len() as usize);
-        file.read_to_end(&mut buffer).await?;
+        // One blocking-pool hop for the whole read; reading through
+        // `tokio::fs::File` costs a hop per chunk.
+        let buffer = fs::read(&full_path).await?;
         Ok(AudioBuffer::from_bytes(buffer))
     }
 
@@ -41,16 +40,7 @@ impl AudioStorage for FileStorage {
             debug!("full path {}", p);
         }
 
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(full_path)
-            .await?;
-        file.write_all(blob.as_ref()).await?;
+        write_atomic(full_path, blob.bytes()).await?;
         Ok(())
     }
 
@@ -83,7 +73,7 @@ impl AudioStorage for FileStorage {
     async fn list(&self) -> Result<Vec<String>> {
         let dir = self.base_dir.join(Path::new(&self.path_prefix));
         let mut keys = Vec::new();
-        if dir.is_dir() {
+        if fs::metadata(&dir).await.is_ok_and(|m| m.is_dir()) {
             let mut entries = tokio::fs::read_dir(&dir).await?;
             while let Some(entry) = entries.next_entry().await? {
                 if entry.file_type().await?.is_file()

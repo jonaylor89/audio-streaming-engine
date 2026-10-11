@@ -50,6 +50,8 @@ fn processor(concurrency: usize) -> Processor {
         max_cache_files: 100,
         max_cache_mem: 50 * 1024 * 1024,
         max_cache_size: 200 * 1024 * 1024,
+        max_source_size: 100 * 1024 * 1024,
+        remote_cache_ttl_secs: 0,
     })
 }
 
@@ -600,6 +602,135 @@ mod thumbnail {
 
         bencher.bench(|| {
             black_box(analyze(black_box(&f.samples), f.sample_rate, black_box(&config)).unwrap())
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trimming a short clip out of a long source
+// ---------------------------------------------------------------------------
+mod trim {
+    use super::*;
+
+    /// ~10 min MP3, encoded once from a synthetic swept tone (concatenating
+    /// real MP3 files leaves ID3/Xing headers mid-stream, which the decoder
+    /// rejects).
+    static LONG_MP3: LazyLock<AudioBuffer> = LazyLock::new(|| {
+        const RATE: u32 = 44_100;
+        const SECS: u32 = 600;
+        let n = (RATE * SECS) as usize;
+        let mut wav = Vec::with_capacity(44 + n * 2);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + n as u32 * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&RATE.to_le_bytes());
+        wav.extend_from_slice(&(RATE * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(n as u32 * 2).to_le_bytes());
+        for i in 0..n {
+            let t = i as f32 / RATE as f32;
+            let freq = 220.0 + 440.0 * ((t / 30.0).sin() * 0.5 + 0.5);
+            let s = (2.0 * std::f32::consts::PI * freq * t).sin() * 0.5;
+            wav.extend_from_slice(&((s * i16::MAX as f32) as i16).to_le_bytes());
+        }
+        let wav = AudioBuffer::from_bytes_with_format(wav, AudioFormat::Wav);
+        let params = Params {
+            key: "long.wav".into(),
+            format: Some(AudioFormat::Mp3),
+            ..Default::default()
+        };
+        rt().block_on(processor(1).process(&wav, &params))
+            .expect("encode long fixture")
+    });
+
+    fn bench_trim(bencher: Bencher<'_, '_>, start_time: f64) {
+        // Build the fixture outside the bench runtime (it runs its own).
+        LazyLock::force(&LONG_MP3);
+        let proc = processor(1);
+        let rt = rt();
+        let params = Params {
+            key: "long.mp3".into(),
+            format: Some(AudioFormat::Mp3),
+            start_time: Some(start_time),
+            duration: Some(10.0),
+            ..Default::default()
+        };
+
+        bencher.bench(|| {
+            rt.block_on(async {
+                black_box(
+                    proc.process(black_box(&*LONG_MP3), black_box(&params))
+                        .await
+                        .unwrap(),
+                )
+            })
+        });
+    }
+
+    /// First 10s of a 10 min file.
+    #[divan::bench(ignore = cfg!(codspeed))]
+    fn clip_10s_at_start(bencher: Bencher<'_, '_>) {
+        bench_trim(bencher, 0.0);
+    }
+
+    /// 10s from the middle of a 10 min file.
+    #[divan::bench(ignore = cfg!(codspeed))]
+    fn clip_10s_at_middle(bencher: Bencher<'_, '_>) {
+        bench_trim(bencher, 300.0);
+    }
+
+    /// Last 10s of a 10 min file.
+    #[divan::bench(ignore = cfg!(codspeed))]
+    fn clip_10s_at_end(bencher: Bencher<'_, '_>) {
+        bench_trim(bencher, 590.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent streaming: one stream per CPU, all draining at once
+// ---------------------------------------------------------------------------
+mod concurrent_streaming {
+    use super::*;
+
+    #[divan::bench(ignore = cfg!(codspeed))]
+    fn streams_per_cpu(bencher: Bencher<'_, '_>) {
+        let n = num_cpus::get();
+        let proc = Arc::new(processor(n));
+        let rt = rt();
+        let params = Arc::new(Params {
+            key: "sample1.mp3".into(),
+            format: Some(AudioFormat::Mp3),
+            volume: Some(0.9),
+            ..Default::default()
+        });
+
+        bencher.bench(|| {
+            rt.block_on(async {
+                let tasks: Vec<_> = (0..n)
+                    .map(|_| {
+                        let proc = proc.clone();
+                        let params = params.clone();
+                        tokio::spawn(async move {
+                            let stream =
+                                proc.process_streaming(&SAMPLE_MP3, &params).await.unwrap();
+                            futures::pin_mut!(stream);
+                            let mut total = 0usize;
+                            while let Some(chunk) = stream.next().await {
+                                total += chunk.unwrap().len();
+                            }
+                            total
+                        })
+                    })
+                    .collect();
+                for t in tasks {
+                    black_box(t.await.unwrap());
+                }
+            })
         });
     }
 }

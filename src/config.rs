@@ -33,6 +33,11 @@ pub struct ApplicationSettings {
     pub hmac_secret: SecretString,
     pub web_ui: bool,
     pub clear_on_startup: bool,
+    /// Allow remote sources on loopback, private and link-local addresses.
+    /// Off by default: remote source URLs are user-supplied, so allowing this
+    /// lets anyone make the server request internal hosts (e.g. the cloud
+    /// metadata endpoint). Only enable it for local development.
+    pub allow_private_remote_urls: bool,
 }
 
 impl Default for ApplicationSettings {
@@ -42,6 +47,7 @@ impl Default for ApplicationSettings {
             hmac_secret: SecretString::from("this-is-a-secret".to_string()),
             web_ui: false,
             clear_on_startup: false,
+            allow_private_remote_urls: false,
         }
     }
 }
@@ -63,10 +69,20 @@ pub struct ProcessorSettings {
     /// Defaults to 100 MB.
     #[serde(default = "default_max_source_size")]
     pub max_source_size: usize,
+
+    /// How long downloaded remote sources (http(s) URLs, Audius tracks) stay
+    /// in the response cache, in seconds. 0 disables source caching.
+    /// Defaults to 1 hour.
+    #[serde(default = "default_remote_cache_ttl_secs")]
+    pub remote_cache_ttl_secs: u64,
 }
 
 fn default_max_source_size() -> usize {
     100 * 1024 * 1024 // 100 MB
+}
+
+fn default_remote_cache_ttl_secs() -> u64 {
+    60 * 60
 }
 
 #[derive(Deserialize, Clone, Default)]

@@ -41,8 +41,9 @@ mod file_storage {
                 let buffer = AudioBuffer::from_bytes(generate_audio_data(size_kb));
                 (dir, storage, buffer)
             })
-            .bench_values(|(_dir, storage, buffer)| {
-                rt.block_on(async { storage.put("bench.mp3", &buffer).await.unwrap() })
+            // `bench_refs` so dropping the TempDir isn't timed.
+            .bench_refs(|(_dir, storage, buffer)| {
+                rt.block_on(async { storage.put("bench.mp3", buffer).await.unwrap() })
             });
     }
 
@@ -61,7 +62,8 @@ mod file_storage {
                 rt.block_on(async { storage.put("bench.mp3", &buffer).await.unwrap() });
                 (dir, storage)
             })
-            .bench_values(|(_dir, storage)| {
+            // `bench_refs` so dropping the TempDir isn't timed.
+            .bench_refs(|(_dir, storage)| {
                 rt.block_on(async { storage.get("bench.mp3").await.unwrap() })
             });
     }
@@ -75,9 +77,11 @@ mod filesystem_cache {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let dir = tempdir().unwrap();
         let cache = rt.block_on(async { FileSystemCache::new(dir.path(), 1000).unwrap() });
-        let data = generate_audio_data(size_kb);
+        let data = bytes::Bytes::from(generate_audio_data(size_kb));
 
-        bencher.bench(|| rt.block_on(async { cache.set("bench_key", &data, None).await.unwrap() }));
+        bencher.bench(|| {
+            rt.block_on(async { cache.set("bench_key", data.clone(), None).await.unwrap() })
+        });
     }
 
     #[divan::bench(args = SIZES_KB)]
@@ -86,8 +90,8 @@ mod filesystem_cache {
         let dir = tempdir().unwrap();
         let cache = rt.block_on(async {
             let c = FileSystemCache::new(dir.path(), 1000).unwrap();
-            let data = generate_audio_data(size_kb);
-            c.set("bench_key", &data, None).await.unwrap();
+            let data = bytes::Bytes::from(generate_audio_data(size_kb));
+            c.set("bench_key", data, None).await.unwrap();
             c
         });
 
@@ -112,8 +116,9 @@ mod storage_vs_cache {
                 let buffer = AudioBuffer::from_bytes(generate_audio_data(size_kb));
                 (dir, storage, buffer)
             })
-            .bench_values(|(_dir, storage, buffer)| {
-                rt.block_on(async { storage.put("cmp.mp3", &buffer).await.unwrap() })
+            // `bench_refs` so dropping the TempDir isn't timed.
+            .bench_refs(|(_dir, storage, buffer)| {
+                rt.block_on(async { storage.put("cmp.mp3", buffer).await.unwrap() })
             });
     }
 
@@ -122,8 +127,10 @@ mod storage_vs_cache {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let dir = tempdir().unwrap();
         let cache = rt.block_on(async { FileSystemCache::new(dir.path(), 1000).unwrap() });
-        let data = generate_audio_data(size_kb);
+        let data = bytes::Bytes::from(generate_audio_data(size_kb));
 
-        bencher.bench(|| rt.block_on(async { cache.set("cmp_key", &data, None).await.unwrap() }));
+        bencher.bench(|| {
+            rt.block_on(async { cache.set("cmp_key", data.clone(), None).await.unwrap() })
+        });
     }
 }

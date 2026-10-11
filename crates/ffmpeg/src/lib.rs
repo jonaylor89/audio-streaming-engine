@@ -11,6 +11,7 @@ mod pcm;
 mod pipeline;
 
 pub use error::FfmpegError;
+pub use io::ChunkSink;
 pub use metadata::{extract_metadata, AudioFileMetadata};
 pub use pcm::{decode_to_pcm, PcmData};
 pub use pipeline::{AudioProcessor, OutputFormat, ProcessOptions};

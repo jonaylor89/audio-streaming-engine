@@ -1,10 +1,11 @@
-use crate::cache::Cache;
+use crate::cache::{AudioCache, Cache};
 use crate::config::{Settings, StorageClient, StorageSettings};
 use crate::inflight::InflightTracker;
 use crate::metrics::{setup_metrics_recorder, track_metrics};
 use crate::middleware::auth_middleware;
 use crate::middleware::cache_middleware;
 use crate::processor::Processor;
+use crate::remote::RemoteFetcher;
 use crate::routes::health::health_check;
 use crate::routes::list::list_handler;
 use crate::routes::meta::meta_handler;
@@ -106,6 +107,8 @@ impl Application {
         };
 
         let max_source_size = config.processor.max_source_size;
+        let remote_cache_ttl = Some(Duration::from_secs(config.processor.remote_cache_ttl_secs))
+            .filter(|ttl| !ttl.is_zero());
         let processor = Processor::new(config.processor);
 
         if config.application.clear_on_startup {
@@ -115,7 +118,7 @@ impl Application {
             }
         }
 
-        let cache = Cache::new(config.cache).await?;
+        let cache: Arc<dyn AudioCache> = Arc::new(Cache::new(config.cache).await?);
 
         info!("initializing source storage");
         let storage = build_storage(config.storage).await?;
@@ -128,18 +131,18 @@ impl Application {
             storage.clone()
         };
 
-        let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .expect("Failed to build HTTP client");
+        let remote = Arc::new(RemoteFetcher::new(
+            cache.clone(),
+            remote_cache_ttl,
+            config.application.allow_private_remote_urls,
+        )?);
 
         let state = AppStateDyn {
             storage,
             result_storage,
             processor: Arc::new(processor),
-            cache: Arc::new(cache),
-            http_client,
+            cache,
+            remote,
             web_config,
             hmac_secret: config.application.hmac_secret.clone(),
             inflight: Arc::new(InflightTracker::new()),

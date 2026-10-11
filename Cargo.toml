@@ -119,3 +119,9 @@ serde_urlencoded = "0.7.1"
 wiremock = "0.5.22"
 mockall = "0.13.1"
 divan = { version = "2.10.1", package = "codspeed-divan-compat" }
+
+[profile.release]
+# Cross-crate inlining and whole-program optimization for the server binary.
+# Slower release builds in exchange for faster code; `cargo bench` inherits this.
+lto = "fat"
+codegen-units = 1

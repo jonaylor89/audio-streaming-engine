@@ -36,6 +36,19 @@ The server fetches the audio, builds an FFmpeg filter chain from the query param
 - `HASH` — URL signature hash, or `unsafe` for development
 - `AUDIO` — audio URI (local file or remote URL)
 
+### Remote Sources
+
+Remote URLs should be percent-encoded so their own query strings survive (e.g. `/unsafe/https%3A%2F%2Fexample.com%2Fsong.mp3%3Ftoken%3Dabc`). Besides direct file URLs, these page links are resolved to the underlying audio:
+
+- **Audius** track pages (`audius.co/<artist>/<track>`)
+- **Internet Archive** items (`archive.org/details/<item>` picks an audio file; `archive.org/details/<item>/<file>` fetches that file)
+- **Dropbox** share links (`dropbox.com/s/...`, `dropbox.com/scl/fi/...?rlkey=...`)
+- **Google Drive** file links (`drive.google.com/file/d/<id>/view`, `/open?id=`, `/uc?id=`)
+- **OneDrive** share links (`1drv.ms/...`, `onedrive.live.com/...`, `<tenant>.sharepoint.com/:u:/...`)
+- **GitHub** file pages (`github.com/<owner>/<repo>/blob/<ref>/<path>`)
+
+Downloaded sources are cached for `processor.remote_cache_ttl_secs` (default 3600; `0` disables). For safety, remote fetches to loopback, private and link-local addresses are refused, including via redirects; set `application.allow_private_remote_urls: true` only for local development.
+
 ## Supported Parameters
 
 ### Format & Encoding

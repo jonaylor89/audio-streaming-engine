@@ -1,9 +1,11 @@
 use super::AudioCache;
 use crate::disk_evictor::DiskEvictor;
+use crate::utils::write_atomic;
 use async_trait::async_trait;
 use bytes::Bytes;
 use color_eyre::Result;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tokio::fs as tokio_fs;
@@ -32,23 +34,50 @@ impl FileSystemCache {
     fn get_meta_path(&self, key: &str) -> PathBuf {
         self.base_path.join(format!("{}.meta", key))
     }
+}
 
-    async fn is_expired(&self, key: &str) -> Result<bool> {
-        let meta_path = self.get_meta_path(key);
+/// Outcome of reading a cache entry from disk.
+enum DiskRead {
+    Missing,
+    Expired { size: u64 },
+    Hit(Vec<u8>),
+}
 
-        if !meta_path.exists() {
-            return Ok(false);
-        }
+/// Read a cache entry and its optional TTL sidecar in one go. Meant to run on
+/// the blocking pool, so the whole lookup costs a single hop.
+fn read_entry(file_path: &Path, meta_path: &Path) -> std::io::Result<DiskRead> {
+    let data = match fs::read(file_path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(DiskRead::Missing),
+        Err(e) => return Err(e),
+    };
 
-        let content = tokio_fs::read_to_string(&meta_path).await?;
-        if let Ok(expiry) = content.parse::<u64>() {
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)?
-                .as_secs();
-            Ok(now > expiry)
-        } else {
-            Ok(false)
-        }
+    // No sidecar means no TTL; that's a single failed open().
+    let expired = match fs::read_to_string(meta_path) {
+        Ok(content) => content.trim().parse::<u64>().is_ok_and(|expiry| {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|now| now.as_secs() > expiry)
+                .unwrap_or(false)
+        }),
+        Err(e) if e.kind() == ErrorKind::NotFound => false,
+        Err(e) => return Err(e),
+    };
+
+    if expired {
+        let size = data.len() as u64;
+        fs::remove_file(file_path)?;
+        let _ = fs::remove_file(meta_path);
+        return Ok(DiskRead::Expired { size });
+    }
+    Ok(DiskRead::Hit(data))
+}
+
+/// Remove a file, treating "already gone" as success.
+async fn remove_if_exists(path: &Path) -> std::io::Result<()> {
+    match tokio_fs::remove_file(path).await {
+        Err(e) if e.kind() != ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
 }
 
@@ -56,25 +85,19 @@ impl FileSystemCache {
 impl AudioCache for FileSystemCache {
     async fn get(&self, key: &str) -> Result<Option<Bytes>> {
         let file_path = self.get_file_path(key);
+        let meta_path = self.get_meta_path(key);
 
-        if !file_path.exists() {
-            return Ok(None);
-        }
-
-        if self.is_expired(key).await? {
-            // Proactively clean up expired entries — only track after successful delete
-            let size = tokio_fs::metadata(&file_path).await.map(|m| m.len()).ok();
-            if tokio_fs::remove_file(&file_path).await.is_ok()
-                && let Some(s) = size
-            {
-                self.evictor.track_delete(s);
+        let read =
+            tokio::task::spawn_blocking(move || read_entry(&file_path, &meta_path)).await??;
+        match read {
+            DiskRead::Missing => Ok(None),
+            DiskRead::Expired { size } => {
+                // Expired entries are removed proactively by `read_entry`.
+                self.evictor.track_delete(size);
+                Ok(None)
             }
-            let _ = tokio_fs::remove_file(self.get_meta_path(key)).await;
-            return Ok(None);
+            DiskRead::Hit(data) => Ok(Some(Bytes::from(data))),
         }
-
-        let contents = tokio_fs::read(&file_path).await?;
-        Ok(Some(Bytes::from(contents)))
     }
 
     async fn set(&self, key: &str, value: Bytes, ttl: Option<Duration>) -> Result<()> {
@@ -83,7 +106,7 @@ impl AudioCache for FileSystemCache {
         // Check existing size before overwriting
         let old_size = tokio_fs::metadata(&file_path).await.map(|m| m.len()).ok();
 
-        tokio_fs::write(&file_path, &value).await?;
+        write_atomic(file_path, value.clone()).await?;
 
         if let Some(duration) = ttl {
             let meta_path = self.get_meta_path(key);
@@ -92,7 +115,7 @@ impl AudioCache for FileSystemCache {
                 .as_secs()
                 + duration.as_secs();
 
-            if let Err(e) = tokio_fs::write(&meta_path, expiry.to_string()).await {
+            if let Err(e) = write_atomic(meta_path, expiry.to_string().into()).await {
                 // Data file was written successfully — still track it even
                 // though the sidecar failed, so the counter stays accurate.
                 if let Some(old) = old_size {
@@ -116,16 +139,11 @@ impl AudioCache for FileSystemCache {
         let file_path = self.get_file_path(key);
         let meta_path = self.get_meta_path(key);
 
-        if file_path.exists() {
-            let size = tokio_fs::metadata(&file_path).await.map(|m| m.len()).ok();
-            tokio_fs::remove_file(&file_path).await?;
-            if let Some(s) = size {
-                self.evictor.track_delete(s);
-            }
+        if let Ok(meta) = tokio_fs::metadata(&file_path).await {
+            remove_if_exists(&file_path).await?;
+            self.evictor.track_delete(meta.len());
         }
-        if meta_path.exists() {
-            tokio_fs::remove_file(&meta_path).await?;
-        }
+        remove_if_exists(&meta_path).await?;
 
         debug!(key, "deleted cache entry");
         Ok(())

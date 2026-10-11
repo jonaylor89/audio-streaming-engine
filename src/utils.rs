@@ -13,6 +13,10 @@ impl AppError {
     pub fn new(error: eyre::Error, status: StatusCode) -> Self {
         Self { error, status }
     }
+
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
 }
 
 impl IntoResponse for AppError {
@@ -72,4 +76,30 @@ pub fn sniff_content_type(buf: &[u8]) -> String {
     infer::get(buf)
         .map(|t| t.to_string())
         .unwrap_or_else(|| "audio/mpeg".to_string())
+}
+
+/// Write `data` to `path` so that concurrent readers see either the old file
+/// or the complete new one, never a partially written file: the bytes go to a
+/// temporary sibling first, which is then renamed over `path`. Missing parent
+/// directories are created.
+///
+/// Runs as a single blocking task rather than one per filesystem call.
+pub async fn write_atomic(path: std::path::PathBuf, data: bytes::Bytes) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+        tmp_name.push(format!(".tmp.{:016x}", rand::random::<u64>()));
+        let tmp_path = path.with_file_name(tmp_name);
+
+        let result =
+            std::fs::write(&tmp_path, &data).and_then(|()| std::fs::rename(&tmp_path, &path));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+        result
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
